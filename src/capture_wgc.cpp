@@ -1,0 +1,339 @@
+// capture_wgc.cpp  Windows Graphics Capture using WinRT C ABI
+// No C++/WinRT dependency. Cross-GPU (NVIDIA / AMD / Intel).
+#include "capture_wgc.h"
+
+#define WIDL_using_Windows_Graphics_DirectX_Direct3D11
+#define WIDL_using_Windows_Graphics_Capture
+#define WIDL_using_Windows_Graphics
+
+#include <cstdio>
+#include <windows.h>
+#include <winstring.h>
+#include <roapi.h>
+#include <initguid.h>
+
+// WinRT ABI headers (MinGW WIDL-generated)
+#include <windows.graphics.capture.h>
+#include <windows.graphics.capture.interop.h>
+#include <windows.graphics.directx.direct3d11.h>
+
+// ---- IDirect3DDxgiInterfaceAccess (not in MinGW WIDL headers) ----
+// {A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1}
+static const GUID IID_IDirect3DDxgiInterfaceAccess = {
+    0xA9B3D012, 0x3DF2, 0x4EE3, {0xB8,0xD1,0x86,0x95,0xF4,0x57,0xD3,0xC1}};
+
+struct IDirect3DDxgiInterfaceAccess : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetInterface(REFIID riid, void **p) = 0;
+};
+
+// ---- Namespace aliases ----
+namespace WGC = ABI::Windows::Graphics::Capture;
+namespace WGD = ABI::Windows::Graphics::DirectX;
+namespace WGD3D = ABI::Windows::Graphics::DirectX::Direct3D11;
+
+using WGC::IDirect3D11CaptureFramePoolStatics;
+using WGC::IDirect3D11CaptureFramePool;
+using WGC::IGraphicsCaptureSession;
+using WGC::IGraphicsCaptureSession2;
+using WGC::IGraphicsCaptureSession3;
+using WGC::IDirect3D11CaptureFrame;
+using WGC::IGraphicsCaptureItem;
+using WGD3D::IDirect3DDevice;
+using WGD3D::IDirect3DSurface;
+using ABI::Windows::Graphics::SizeInt32;
+
+// GUIDs not exported as IID_ in MinGW WIDL
+// {A37624AB-8D5F-4650-9D3E-9EAE3D9BC670}
+static const GUID IID_IDirect3DDevice_WGC = {
+    0xa37624ab, 0x8d5f, 0x4650, {0x9d,0x3e,0x9e,0xae,0x3d,0x9b,0xc6,0x70}};
+// {2C39AE40-7D2E-5044-804E-8B6799D4CF9E}  IGraphicsCaptureSession2
+static const GUID IID_IGraphicsCaptureSession2_WGC = {
+    0x2c39ae40, 0x7d2e, 0x5044, {0x80,0x4e,0x8b,0x67,0x99,0xd4,0xcf,0x9e}};
+// {F2CDD966-22AE-5EA1-9596-3A289344C3BE}  IGraphicsCaptureSession3
+static const GUID IID_IGCS3 = {
+    0xf2cdd966, 0x22ae, 0x5ea1, {0x95,0x96,0x3a,0x28,0x93,0x44,0xc3,0xbe}};
+
+// ---- Helpers ----
+static HRESULT WGC_GetActivationFactory(const wchar_t* className, REFIID iid, void** factory) {
+    HSTRING hstr = nullptr;
+    HRESULT hr = WindowsCreateString(className, (UINT32)wcslen(className), &hstr);
+    if (FAILED(hr)) return hr;
+    hr = RoGetActivationFactory(hstr, iid, factory);
+    WindowsDeleteString(hstr);
+    return hr;
+}
+
+typedef HRESULT (WINAPI *PFN_CreateDirect3D11DeviceFromDXGIDevice)(
+    IDXGIDevice* dxgiDevice, IInspectable** outDevice);
+
+static HRESULT WGC_WrapD3DDevice(ID3D11Device* d3dDev, IDirect3DDevice** outDev) {
+    static PFN_CreateDirect3D11DeviceFromDXGIDevice pFn = nullptr;
+    if (!pFn) {
+        HMODULE d3d11 = LoadLibraryA("d3d11.dll");
+        if (!d3d11) return E_FAIL;
+        pFn = (PFN_CreateDirect3D11DeviceFromDXGIDevice)
+              GetProcAddress(d3d11, "CreateDirect3D11DeviceFromDXGIDevice");
+        if (!pFn) return E_FAIL;
+    }
+    IDXGIDevice* dxgiDev = nullptr;
+    HRESULT hr = d3dDev->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgiDev);
+    if (FAILED(hr)) return hr;
+    IInspectable* insp = nullptr;
+    hr = pFn(dxgiDev, &insp);
+    dxgiDev->Release();
+    if (FAILED(hr)) return hr;
+    hr = insp->QueryInterface(IID_IDirect3DDevice_WGC, (void**)outDev);
+    insp->Release();
+    return hr;
+}
+
+// ---- Border suppression ----
+static bool WGC_TrySuppressBorder(IGraphicsCaptureSession* sess) {
+    IGraphicsCaptureSession3* sess3 = nullptr;
+    HRESULT hr3 = sess->QueryInterface(IID_IGCS3, (void**)&sess3);
+    if (FAILED(hr3) || !sess3) {
+        fprintf(stderr, "[WGC] IGraphicsCaptureSession3 not available (border will show)\n");
+        return false;
+    }
+    boolean borderOff = false;
+    HRESULT hrBorder = sess3->put_IsBorderRequired(borderOff);
+    sess3->Release();
+    if (SUCCEEDED(hrBorder)) {
+        fprintf(stderr, "[WGC] IsBorderRequired(false) OK\n");
+        return true;
+    }
+    fprintf(stderr, "[WGC] IsBorderRequired(false) FAILED: 0x%08X\n", (unsigned)hrBorder);
+    return false;
+}
+
+bool WGC_ProbeBorderSupport() {
+    HKEY hKey = nullptr;
+    char buildStr[64] = {};
+    DWORD size = sizeof(buildStr);
+    LONG result = RegGetValueA(HKEY_LOCAL_MACHINE,
+                               "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                               "CurrentBuild",
+                               RRF_RT_REG_SZ, nullptr, buildStr, &size);
+    if (result != ERROR_SUCCESS) return false;
+    int build = atoi(buildStr);
+    return (build >= 22621); // Win11 22H2
+}
+
+// ---- WGCCapture internal fields (beyond the public header) ----
+// We store WinRT COM pointers as IUnknown* in the struct to avoid
+// exposing WinRT headers in capture_wgc.h
+
+bool WGC_Init(WGCCapture* wgc, HMONITOR hmon) {
+    if (!wgc) return false;
+    wgc->active = false;
+    wgc->borderSuppressed = false;
+
+    // 1. Create D3D11 device
+    D3D_FEATURE_LEVEL featLevel;
+    HRESULT hr = D3D11CreateDevice(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        nullptr, 0, D3D11_SDK_VERSION,
+        &wgc->d3dDev, &featLevel, &wgc->d3dCtx);
+    if (FAILED(hr)) {
+        fprintf(stderr, "[WGC] D3D11CreateDevice failed: 0x%08X\n", (unsigned)hr);
+        return false;
+    }
+
+    // 2. Initialize WinRT MTA
+    hr = RoInitialize(RO_INIT_MULTITHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        fprintf(stderr, "[WGC] RoInitialize failed: 0x%08X\n", (unsigned)hr);
+        WGC_Shutdown(wgc);
+        return false;
+    }
+
+    // 3. Get IGraphicsCaptureItemInterop factory
+    IGraphicsCaptureItemInterop* interop = nullptr;
+    hr = WGC_GetActivationFactory(
+        L"Windows.Graphics.Capture.GraphicsCaptureItem",
+        IID_IGraphicsCaptureItemInterop,
+        (void**)&interop);
+    if (FAILED(hr)) {
+        fprintf(stderr, "[WGC] GraphicsCaptureItem factory failed: 0x%08X\n", (unsigned)hr);
+        WGC_Shutdown(wgc);
+        return false;
+    }
+
+    // 4. Create capture item for specified monitor
+    IGraphicsCaptureItem* item = nullptr;
+    hr = interop->CreateForMonitor(
+        hmon ? hmon : MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY),
+        __uuidof(IGraphicsCaptureItem),
+        (void**)&item);
+    interop->Release();
+    if (FAILED(hr)) {
+        fprintf(stderr, "[WGC] CreateForMonitor failed: 0x%08X\n", (unsigned)hr);
+        WGC_Shutdown(wgc);
+        return false;
+    }
+
+    // 5. Wrap D3D11 device as WinRT IDirect3DDevice
+    IDirect3DDevice* rtDevice = nullptr;
+    hr = WGC_WrapD3DDevice(wgc->d3dDev, &rtDevice);
+    if (FAILED(hr)) {
+        fprintf(stderr, "[WGC] Wrap D3D device failed: 0x%08X\n", (unsigned)hr);
+        item->Release();
+        WGC_Shutdown(wgc);
+        return false;
+    }
+
+    // 6. Get FramePool factory
+    IDirect3D11CaptureFramePoolStatics* poolStatics = nullptr;
+    hr = WGC_GetActivationFactory(
+        L"Windows.Graphics.Capture.Direct3D11CaptureFramePool",
+        __uuidof(IDirect3D11CaptureFramePoolStatics),
+        (void**)&poolStatics);
+    if (FAILED(hr)) {
+        fprintf(stderr, "[WGC] FramePool factory failed: 0x%08X\n", (unsigned)hr);
+        rtDevice->Release();
+        item->Release();
+        WGC_Shutdown(wgc);
+        return false;
+    }
+
+    // 7. Query monitor real resolution
+    SetProcessDPIAware();
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(hmon ? hmon : MonitorFromWindow(nullptr, MONITOR_DEFAULTTOPRIMARY), &mi);
+    wgc->width  = mi.rcMonitor.right - mi.rcMonitor.left;
+    wgc->height = mi.rcMonitor.bottom - mi.rcMonitor.top;
+
+    // 8. Create frame pool (3 buffers, BGRA8)
+    IDirect3D11CaptureFramePool* pool = nullptr;
+    WGD::DirectXPixelFormat pixelFmt = WGD::DirectXPixelFormat_B8G8R8A8UIntNormalized;
+    SizeInt32 size = { wgc->width, wgc->height };
+    hr = poolStatics->Create(rtDevice, pixelFmt, 3, size, &pool);
+    rtDevice->Release();
+    poolStatics->Release();
+    if (FAILED(hr)) {
+        fprintf(stderr, "[WGC] Create frame pool failed: 0x%08X\n", (unsigned)hr);
+        item->Release();
+        WGC_Shutdown(wgc);
+        return false;
+    }
+    wgc->wgcPool = pool;
+
+    // 9. Create capture session
+    IGraphicsCaptureSession* sess = nullptr;
+    hr = pool->CreateCaptureSession(item, &sess);
+    item->Release();
+    if (FAILED(hr)) {
+        fprintf(stderr, "[WGC] CreateCaptureSession failed: 0x%08X\n", (unsigned)hr);
+        WGC_Shutdown(wgc);
+        return false;
+    }
+    wgc->wgcSession = sess;
+
+    // 10. Start capture
+    hr = sess->StartCapture();
+    if (FAILED(hr)) {
+        fprintf(stderr, "[WGC] StartCapture failed: 0x%08X\n", (unsigned)hr);
+        WGC_Shutdown(wgc);
+        return false;
+    }
+
+    // 10b. Suppress yellow border (Win11 22H2+)
+    wgc->borderSuppressed = WGC_TrySuppressBorder(sess);
+
+    // 10c. Disable cursor capture
+    {
+        IGraphicsCaptureSession2* sess2 = nullptr;
+        HRESULT hr2 = sess->QueryInterface(IID_IGraphicsCaptureSession2_WGC, (void**)&sess2);
+        if (SUCCEEDED(hr2) && sess2) {
+            sess2->put_IsCursorCaptureEnabled(false);
+            sess2->Release();
+        }
+    }
+
+    // 11. Create staging texture for GPU→CPU readback
+    D3D11_TEXTURE2D_DESC stagingDesc = {};
+    stagingDesc.Width          = wgc->width;
+    stagingDesc.Height         = wgc->height;
+    stagingDesc.MipLevels      = 1;
+    stagingDesc.ArraySize      = 1;
+    stagingDesc.Format         = DXGI_FORMAT_B8G8R8A8_UNORM;
+    stagingDesc.SampleDesc.Count = 1;
+    stagingDesc.Usage          = D3D11_USAGE_STAGING;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    stagingDesc.BindFlags      = 0;
+    hr = wgc->d3dDev->CreateTexture2D(&stagingDesc, nullptr, &wgc->stagingTex);
+    if (FAILED(hr)) {
+        fprintf(stderr, "[WGC] Create staging tex failed: 0x%08X\n", (unsigned)hr);
+        WGC_Shutdown(wgc);
+        return false;
+    }
+
+    wgc->active = true;
+    fprintf(stderr, "[WGC] Capture ready: %dx%d\n", wgc->width, wgc->height);
+    return true;
+}
+
+void WGC_Shutdown(WGCCapture* wgc) {
+    if (!wgc) return;
+    if (wgc->stagingTex) { wgc->stagingTex->Release(); wgc->stagingTex = nullptr; }
+    if (wgc->wgcSession) { ((IGraphicsCaptureSession*)wgc->wgcSession)->Release(); wgc->wgcSession = nullptr; }
+    if (wgc->wgcPool)    { ((IDirect3D11CaptureFramePool*)wgc->wgcPool)->Release(); wgc->wgcPool = nullptr; }
+    if (wgc->d3dCtx)     { wgc->d3dCtx->Release(); wgc->d3dCtx = nullptr; }
+    if (wgc->d3dDev)     { wgc->d3dDev->Release(); wgc->d3dDev = nullptr; }
+    wgc->active = false;
+}
+
+ID3D11Texture2D* WGC_GetFrame(WGCCapture* wgc) {
+    if (!wgc || !wgc->active) return nullptr;
+    IDirect3D11CaptureFramePool* pool = (IDirect3D11CaptureFramePool*)wgc->wgcPool;
+    IDirect3D11CaptureFrame* frame = nullptr;
+    HRESULT hr = pool->TryGetNextFrame(&frame);
+    if (FAILED(hr) || !frame) return nullptr;
+
+    IDirect3DSurface* surface = nullptr;
+    hr = frame->get_Surface(&surface);
+    frame->Release();
+    if (FAILED(hr) || !surface) return nullptr;
+
+    IDirect3DDxgiInterfaceAccess* dxgiAccess = nullptr;
+    hr = surface->QueryInterface(IID_IDirect3DDxgiInterfaceAccess, (void**)&dxgiAccess);
+    surface->Release();
+    if (FAILED(hr) || !dxgiAccess) return nullptr;
+
+    ID3D11Texture2D* tex = nullptr;
+    hr = dxgiAccess->GetInterface(__uuidof(ID3D11Texture2D), (void**)&tex);
+    dxgiAccess->Release();
+    if (FAILED(hr)) return nullptr;
+    return tex;
+}
+
+bool WGC_CopyToStaging(WGCCapture* wgc, ID3D11Texture2D* srcTex, D3D11_MAPPED_SUBRESOURCE* outMapped) {
+    if (!wgc || !wgc->active || !srcTex || !wgc->stagingTex || !outMapped) return false;
+
+    wgc->d3dCtx->CopyResource(wgc->stagingTex, srcTex);
+
+    // D3D11 fence: ensure CopyResource completes before CPU Map
+    ID3D11Query* fence = nullptr;
+    D3D11_QUERY_DESC qdesc = { D3D11_QUERY_EVENT, 0 };
+    if (SUCCEEDED(wgc->d3dDev->CreateQuery(&qdesc, &fence))) {
+        wgc->d3dCtx->End(fence);
+        while (wgc->d3dCtx->GetData(fence, nullptr, 0, 0) == S_FALSE)
+            ; // spin-wait for GPU
+        fence->Release();
+    }
+
+    HRESULT hr = wgc->d3dCtx->Map(wgc->stagingTex, 0, D3D11_MAP_READ, 0, outMapped);
+    return SUCCEEDED(hr);
+}
+
+void WGC_UnmapStaging(WGCCapture* wgc) {
+    if (wgc && wgc->stagingTex)
+        wgc->d3dCtx->Unmap(wgc->stagingTex, 0);
+}
+
+void WGC_ReleaseFrame(WGCCapture* wgc) {
+    // Frame is released automatically when the D3D11 texture is released
+    (void)wgc;
+}

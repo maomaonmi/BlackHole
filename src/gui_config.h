@@ -1,0 +1,183 @@
+#pragma once
+
+// Config data structures and GUI panel declarations
+
+struct DiskPreset {
+    char name[64] = {};
+    float diskTemp    = 5500.0f;
+    float diskIncl    = 1.5f;
+    float diskRoll    = 0.35f;
+    float diskInner   = 1.8f;
+    float diskOuter   = 8.0f;
+    float diskOpac    = 0.9f;
+    float dopplerMix  = 0.6f;
+    float diskBeam    = 2.5f;
+    float diskGain    = 2.2f;
+    float diskContrast = 1.6f;
+    float diskWind    = 7.0f;
+    float diskSpeed   = 5.0f;
+    float exposure    = 1.4f;
+    float starGain    = 0.0f;
+};
+
+struct BlackholeConfig {
+    // Advanced overrides (-1 = use shader default)
+    float holeRadius  = -1.0f;
+    float diskGain    = -1.0f;
+    float diskTemp    = -1.0f;
+    float exposure    = -1.0f;
+    float speed       = -1.0f;
+    float starGain    = -1.0f;
+    float diskIncl    = 1.5f;
+    float lensDepth   = -1.0f;
+    float dilationMin = -1.0f;
+
+    // Time dilation (1.0 = normal)
+    float timeDilation = 1.0f;
+
+    // Relativistic jets
+    bool  jetEnabled     = false;
+    float jetLength      = 20.0f;
+    float jetWidth       = 0.15f;
+    float jetSpeed       = 2.0f;
+    float jetBrightness  = 1.5f;
+
+    // Particle system
+    bool  particleEnabled  = true;
+    int   particleCount    = 2000;
+    float particleSize     = 6.0f;
+    float particleSpiral   = 1.2f;
+    float particleGravity  = 2.0f;
+    float particleColorR   = 1.0f;
+    float particleColorG   = 0.40f;
+    float particleColorB   = 0.05f;
+    int   particleTrailLength = 40;   // trail segments [5, 60]
+    bool  particleCloudEnabled = true; // faint plasma cloud around streams
+
+    // Supermassive black hole mode (larger accretion disk)
+    bool  supermassiveMode = false;
+
+    // Star system (interactive)
+    bool  starEnabled        = true;    // star system on/off
+    float starMaxSize        = 0.25f;   // max star radius (UV proportion)
+    float starGrowthSpeed    = 0.06f;   // grow speed while holding mouse
+    float starFadeSpeed      = 1.2f;    // fade speed on release
+    float starCoronaSize     = 2.0f;    // corona radius multiplier
+    float starCoronaBright   = 0.7f;    // corona brightness
+    float starFlareChance    = 0.5f;    // flare intensity
+    float starColorShift     = 0.15f;   // color shift rate over time
+    bool  starWindEnabled    = true;    // solar wind particles on/off
+    float starWindSpeed      = 1.0f;    // solar wind emission speed
+    int   starWindCount      = 1500;    // max solar wind particles
+    float starWindBright     = 0.8f;    // solar wind brightness
+    float starLensStrength   = 0.3f;    // gravitational lensing strength
+
+    // Star-BH interaction (energy stream)
+    bool  starInteractEnabled = true;    // star-BH interaction on/off
+    float starAbsorbRadius    = 0.25f;   // absorption trigger radius
+    float starAbsorbSpeed     = 0.03f;   // star shrink speed during absorption
+    float streamBright        = 2.0f;    // energy stream brightness multiplier
+    float streamWidth         = 1.0f;    // energy stream width multiplier
+    float streamSpiralTurns   = 2.0f;    // spiral turns around BH
+
+    // Stellar evolution (right-click triggered: star -> white dwarf -> neutron star -> black hole)
+    bool  starEvolutionEnabled = true;   // right-click evolution on/off
+    float evoExpandSpeed       = 0.25f;  // first right-click expansion speed
+    float evoCollapseSpeed     = 0.35f;  // collapse speed (size shrink rate)
+    float supernovaBrightness  = 2.5f;   // supernova flash brightness
+    float supernovaDuration    = 1.2f;   // supernova explosion duration (seconds)
+    float collapseShake        = 0.8f;   // screen shake intensity during collapse
+    float collapseVignette     = 0.7f;   // screen-edge darkening during collapse
+    float collapseTension       = 0.6f;   // fine tension lines during collapse
+    // White dwarf
+    float wdBrightness         = 1.6f;   // white dwarf glow brightness
+    float wdCrystalDetail      = 7.0f;   // crystal texture detail (noise octaves)
+    // Neutron star
+    float nsRotationSpeed      = 6.0f;   // neutron star rotation speed
+    float nsJetLength          = 0.9f;   // polar jet length
+    float nsJetBrightness      = 2.0f;   // polar jet brightness
+    float nsAxisTilt           = 0.6f;   // magnetic axis tilt (rad)
+    float nsPulseRate          = 3.0f;   // pulsar lighthouse sweep rate
+    // Mini black hole (final stage)
+    float miniBHRingBright      = 1.5f;   // photon ring brightness
+    // Dual black hole system (mini BH <-> main BH interactions)
+    bool  dualBHEnabled          = true;
+    float miniBHDiskIncl          = 1.2f;   // accretion disk inclination angle (rad, 0=face-on)
+    float miniBHMouseFollow      = 8.0f;   // mouse-follow spring constant
+    float miniBHGravity          = 0.002f; // gravitational attraction to main BH
+    float miniBHDamping          = 2.0f;   // velocity damping rate
+    float miniBHLensStrength     = 3.0f;   // gravitational lensing strength
+    float gwRippleStrength       = 0.5f;   // gravitational wave ripple intensity
+    float accretionBridgeBright  = 1.0f;   // accretion bridge brightness
+
+    // Smoothed values (lerped toward target each frame)
+    float smoothHoleRadius = -1.0f;
+    float smoothDiskGain   = -1.0f;
+    float smoothDiskTemp   = -1.0f;
+    float smoothExposure   = -1.0f;
+    float smoothSpeed      = -1.0f;
+    float smoothStarGain   = -1.0f;
+    float smoothDiskIncl   = -1.0f;
+    float smoothLensDepth  = -1.0f;
+    float smoothDilationMin = -1.0f;
+
+    // Display mode
+    int   displayMode   = 1;  // 0=always, 1=idle
+    int   idleSeconds   = 300;
+    bool  videoAsIdle   = false;
+
+    // Capture
+    int   captureMode   = -1; // -1=auto, 0=WGC, 1=DXGI
+
+    // Monitor
+    int   monitorIndex  = 0;  // 0=primary
+
+    // Playback
+    int   playMode      = 0;  // 0=sequential, 1=cyclic, 2=random
+    float slotSec       = 5.25f;
+
+    // Fixed size
+    bool  fixedSize     = false;
+    float fixedLevel    = 1.0f;
+
+    // Demo tour mode (automatic preset cycling)
+    bool  demoMode      = true;
+
+    // Auto start
+    bool  autoStart     = false;
+
+    // Presets
+    static const int MAX_PRESETS = 64;
+    int   presetCount = 0;
+    DiskPreset presets[MAX_PRESETS] = {};
+
+    // Full disk parameters (for advanced control)
+    float diskRoll      = -1.0f;
+    float diskInner     = -1.0f;
+    float diskOuter     = -1.0f;
+    float diskOpac      = -1.0f;
+    float dopplerMix    = -1.0f;
+    float diskBeam      = -1.0f;
+    float diskContrast  = -1.0f;
+    float diskWind      = -1.0f;
+    float diskSpeed     = -1.0f;
+};
+
+// Save/Load config (JSON format)
+bool Config_Load(BlackholeConfig* cfg, const char* path);
+bool Config_Save(const BlackholeConfig* cfg, const char* path);
+void Config_SetDefaults(BlackholeConfig* cfg);
+
+// Initialize built-in presets
+void Config_InitBuiltInPresets(BlackholeConfig* cfg);
+
+// Smooth parameter transitions
+void Config_SmoothUpdate(BlackholeConfig* cfg, float dt);
+
+// ImGui panel
+struct Win32GL;
+void GUI_Init(Win32GL* wgl);
+void GUI_Shutdown();
+void GUI_Render(BlackholeConfig* cfg);
+bool GUI_IsActive();
+void GUI_SetActive(bool active);
