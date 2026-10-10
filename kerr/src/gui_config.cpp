@@ -112,6 +112,10 @@ void Config_SetDefaults(BlackholeConfig* cfg) {
     cfg->streamBright        = 2.0f;
     cfg->streamWidth         = 1.0f;
     cfg->streamSpiralTurns   = 2.0f;
+    cfg->tidalEnabled        = true;
+    cfg->tidalRadius         = 0.30f;
+    cfg->tidalRate           = 1.2f;
+    cfg->tidalStretch        = 1.0f;
 
     // Stellar evolution defaults
     cfg->starEvolutionEnabled = true;
@@ -257,6 +261,10 @@ bool Config_Save(const BlackholeConfig* cfg, const char* path) {
     f << "streamBright=" << cfg->streamBright << "\n";
     f << "streamWidth=" << cfg->streamWidth << "\n";
     f << "streamSpiralTurns=" << cfg->streamSpiralTurns << "\n";
+    f << "tidalEnabled=" << (cfg->tidalEnabled ? 1 : 0) << "\n";
+    f << "tidalRadius=" << cfg->tidalRadius << "\n";
+    f << "tidalRate=" << cfg->tidalRate << "\n";
+    f << "tidalStretch=" << cfg->tidalStretch << "\n";
     f << "starEvolutionEnabled=" << (cfg->starEvolutionEnabled ? 1 : 0) << "\n";
     f << "evoExpandSpeed=" << cfg->evoExpandSpeed << "\n";
     f << "evoCollapseSpeed=" << cfg->evoCollapseSpeed << "\n";
@@ -401,6 +409,10 @@ bool Config_Load(BlackholeConfig* cfg, const char* path) {
         else if (key == "streamBright")        cfg->streamBright        = ParseFloat(val, 2.0f);
         else if (key == "streamWidth")         cfg->streamWidth         = ParseFloat(val, 1.0f);
         else if (key == "streamSpiralTurns")   cfg->streamSpiralTurns   = ParseFloat(val, 2.0f);
+        else if (key == "tidalEnabled")        cfg->tidalEnabled        = ParseInt(val, 1) != 0;
+        else if (key == "tidalRadius")         cfg->tidalRadius         = ParseFloat(val, 0.30f);
+        else if (key == "tidalRate")           cfg->tidalRate           = ParseFloat(val, 1.2f);
+        else if (key == "tidalStretch")        cfg->tidalStretch        = ParseFloat(val, 1.0f);
         else if (key == "starEvolutionEnabled") cfg->starEvolutionEnabled = ParseInt(val, 1) != 0;
         else if (key == "evoExpandSpeed")       cfg->evoExpandSpeed       = ParseFloat(val, 0.25f);
         else if (key == "evoCollapseSpeed")     cfg->evoCollapseSpeed     = ParseFloat(val, 0.35f);
@@ -906,6 +918,16 @@ void GUI_Render(BlackholeConfig* cfg) {
             ImGui::SliderFloat(u8"\u80FD\u91CF\u6D41\u4EAE\u5EA6", &cfg->streamBright, 0.5f, 5.0f, u8"%.1f"); // 能量流亮度
             ImGui::SliderFloat(u8"\u80FD\u91CF\u6D41\u5BBD\u5EA6", &cfg->streamWidth, 0.2f, 3.0f, u8"%.1f"); // 能量流宽度
             ImGui::SliderFloat(u8"\u87BA\u65CB\u5708\u6570", &cfg->streamSpiralTurns, 0.5f, 4.0f, u8"%.1f"); // 螺旋圈数
+        }
+
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), u8"\u6F6E\u6C50\u6495\u88C2"); // 潮汐撕裂
+        ImGui::Separator();
+        ImGui::Checkbox(u8"\u542F\u7528\u6495\u88C2", &cfg->tidalEnabled); // 启用撕裂
+        if (cfg->tidalEnabled) {
+            ImGui::SliderFloat(u8"\u6F6E\u6C50\u534A\u5F84", &cfg->tidalRadius, 0.05f, 0.60f, u8"%.2f");  // 潮汐半径
+            ImGui::SliderFloat(u8"\u5265\u79BB\u901F\u7387", &cfg->tidalRate, 0.1f, 5.0f, u8"%.2f");      // 剥离速率
+            ImGui::SliderFloat(u8"\u5F62\u53D8\u5F3A\u5EA6", &cfg->tidalStretch, 0.0f, 4.0f, u8"%.2f");   // 形变强度
         }
 
         ImGui::Spacing();

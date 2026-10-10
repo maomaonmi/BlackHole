@@ -13,6 +13,12 @@ uniform float uStreamWidth       = 1.0;
 uniform float uSpiralTurns       = 2.0;                     
 uniform vec3  uStreamColor       = vec3(1.0, 0.8, 0.5);     
 uniform float uStarAge           = -1.0; // Dynamic star age sent from CPU (-1.0 = fallback auto-cycle)
+// 潮汐模式：>= 0 时拉长/盘绕进度由 CPU 统一积分的剥离进度 p 驱动（<0 → 退回 age 定时器路径）
+uniform float uTidalProgress     = -1.0;
+// 潮汐形变幅度：与 star_frag.glsl 使用同一数值（S4 不变量），0 = 未撕裂
+uniform float uTidalAmp          = 0.0;
+// 本体真实半径（UV, aspect 校正）。>0 时用它与 uTidalAmp 精确对齐流起点，替代原有启发式
+uniform float uStarSize          = 0.0;
 
 // ================================================================
 // Noise toolkit (strictly typed for maximum compatibility)
@@ -87,13 +93,21 @@ void main() {
     // 1. 潮汐撕裂 (TDE) 渐进时间控制 (拉扯与盘绕进度的平滑演化)
     // ------------------------------------------------------------
     float age = uStarAge >= 0.0 ? uStarAge : mod(uTime, 12.0);
-    
-    // 前 5.0 秒为能量流向外拉长伸展的阶段
-    float tdeProgress = clamp(age / 5.0, 0.001, 1.0);
-    
-    // 5.0 秒后完全抵达吸积盘外沿，在接下来的 4 秒内缓慢盘旋缠绕
-    float spiralAge = max(0.0, age - 5.0);
-    float spiralProgress = clamp(spiralAge / 4.0, 0.0, 1.0);
+
+    float tdeProgress;
+    float spiralProgress;
+    if (uTidalProgress >= 0.0) {
+        // 潮汐模式：进度与本体形变严格同源（p 已同时包含距离与时间两个因素）
+        tdeProgress    = clamp(max(uTidalProgress, 0.02), 0.001, 1.0);
+        spiralProgress = clamp((uTidalProgress - 0.70) / 0.30, 0.0, 1.0);
+    } else {
+        // 回退：原有 age 定时器（白矮星 / 中子星 / 黑洞桥 / 关闭潮汐开关时）
+        // 前 5.0 秒为能量流向外拉长伸展的阶段
+        tdeProgress = clamp(age / 5.0, 0.001, 1.0);
+        // 5.0 秒后完全抵达吸积盘外沿，在接下来的 4 秒内缓慢盘旋缠绕
+        float spiralAge = max(0.0, age - 5.0);
+        spiralProgress = clamp(spiralAge / 4.0, 0.0, 1.0);
+    }
 
     // ------------------------------------------------------------
     // 2. 解算黑洞动态视界半径 rh
@@ -130,14 +144,27 @@ void main() {
     // ------------------------------------------------------------
     // 4. 三次贝塞尔曲线控制点 (Cubic Bezier)
     // ------------------------------------------------------------
-    float starRadius = min(0.18, starToBH * 0.25);
+    // 【S4 不变量】流的起点必须落在本体被拉伸后的鼻尖上。
+    // 与 star_frag.glsl 使用同一个 uTidalAmp，因此两侧不可能各自漂移。
+    float tidalAmp = max(uTidalAmp, 0.0);
+    float starRadius;
+    float noseWidth;
+    if (tidalAmp > 0.0 && uStarSize > 0.0) {
+        starRadius = uStarSize * (1.0 + tidalAmp);
+        // w 是流的半宽，因此取本体的半宽 R/(1+amp*0.55)（与 star_frag.glsl 的 expandPerp 同源）
+        noseWidth  = max(uStarSize / (1.0 + tidalAmp * 0.55), 0.004);
+    } else {
+        starRadius = min(0.18, starToBH * 0.25);
+        noseWidth  = 0.04;
+    }
     vec2 p0 = star_corr + dirBH * starRadius; 
     
     float shootOutDist = max(starToBH * 0.20, 0.06);
     vec2 p1 = p0 + dirBH * shootOutDist;
 
     // 【调节速度点】：重力空中微幅缓慢摇摆频数 (0.08 越小越慢)
-    float arcSide = sign(sin(uTime * 0.08)); 
+    // 用双频正弦取代原 sign() 方波：方波每半周期产生一次可见跳变
+    float arcSide = sin(uTime * 0.08) + 0.35 * sin(uTime * 0.017);
     float arcAmount = starToBH * 0.22; 
     vec2 p2 = (p1 + spiral_start) * 0.5 + perpDir * arcAmount * arcSide;
     vec2 p3 = spiral_start;
@@ -162,7 +189,7 @@ void main() {
         // 尖头平滑收缩
         float lengthMask = smoothstep(tdeProgress, max(0.001, tdeProgress - 0.15), s);
 
-        float wBase = mix(0.04, 0.015, s) * lengthMask; 
+        float wBase = mix(noseWidth, 0.015, s) * lengthMask; 
         wBase *= (0.8 + 0.5 * hash11(s * 100.0)); 
         wBase *= uStreamWidth; 
         float w = wBase * uStreamIntensity;

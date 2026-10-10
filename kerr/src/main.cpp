@@ -245,6 +245,12 @@ struct StarObj {
     float bhFormationProgress;  // 0..1 mini black hole formation progress
     float vx, vy;              // velocity (UV/sec) — used by mini BH orbital physics
 
+    // Tidal disruption（恒星潮汐撕裂）
+    // Why: 本体形变与能量流必须由同一物理量驱动；历史上二者分别用距离与 age，
+    //      互不知情，导致"轨迹与本体分离"。
+    float tidalProgress;       // p: 剥离进度 [0, 0.96]，不可逆
+    float tidalAmp;            // 形变幅度（CPU 单点计算，本体与流共用 → S4 不变量）
+
     // Black hole merger
     MergerPhase mergerPhase;    // current merger phase
     float mergerTimer;          // timer within current merger phase
@@ -944,6 +950,7 @@ int main(int argc, char** argv) {
     int suStarColor = -1, suCoronaSize = -1, suTime = -1;
     int suCoronaBright = -1, suFlareChance = -1, suResolution = -1;
     int suBHPos = -1, suBHInfluence = -1;
+    int suTidalAmp = -1;
     int suStarTex = -1;
     // Evolution uniforms
     int suStarStage = -1, suPassMode = -1;
@@ -983,6 +990,7 @@ int main(int argc, char** argv) {
                 suResolution   = glGetUniformLocation(starProgram, "uResolution");
                 suBHPos        = glGetUniformLocation(starProgram, "uBHPos");
                 suBHInfluence  = glGetUniformLocation(starProgram, "uBHInfluence");
+                suTidalAmp     = glGetUniformLocation(starProgram, "uTidalAmp");
                 suStarTex      = glGetUniformLocation(starProgram, "uStarTex");
                 // Evolution uniforms
                 suStarStage         = glGetUniformLocation(starProgram, "uStarStage");
@@ -1033,6 +1041,7 @@ int main(int argc, char** argv) {
     int euTime = -1, euResolution = -1;
     int euStreamWidth = -1, euSpiralTurns = -1, euStreamColor = -1;
     int euStarAge = -1;
+    int euTidalProgress = -1, euTidalAmp = -1, euStarSize = -1;
 
     printf("[BlackHole] Energy stream shaders: vert=%zu bytes, frag=%zu bytes\n", eVertSrc.size(), eFragSrc.size());
 
@@ -1059,6 +1068,9 @@ int main(int argc, char** argv) {
                 euSpiralTurns     = glGetUniformLocation(energyProgram, "uSpiralTurns");
                 euStreamColor     = glGetUniformLocation(energyProgram, "uStreamColor");
                 euStarAge         = glGetUniformLocation(energyProgram, "uStarAge");
+                euTidalProgress   = glGetUniformLocation(energyProgram, "uTidalProgress");
+                euTidalAmp        = glGetUniformLocation(energyProgram, "uTidalAmp");
+                euStarSize        = glGetUniformLocation(energyProgram, "uStarSize");
                 printf("[BlackHole] Energy stream shader program linked OK\n");
             }
         }
@@ -1852,6 +1864,8 @@ int main(int argc, char** argv) {
                     s.bhFormationProgress = 0.0f;
                     s.vx = 0.0f;
                     s.vy = 0.0f;
+                    s.tidalProgress = 0.0f;
+                    s.tidalAmp      = 0.0f;
                     // Merger fields init
                     s.mergerPhase = MERGER_IDLE;
                     s.mergerTimer = 0.0f;
@@ -1945,6 +1959,29 @@ int main(int argc, char** argv) {
                 if (s.state == STAR_DEAD) continue;
 
                 s.age += dt;
+
+                // ===== 潮汐撕裂积分（S1：本体与能量流共用的唯一物理量）=====
+                // 潮汐强度按牛顿潮汐加速度差标度 ∝ r^-3；p 同时随距离与时间演化。
+                // Why: 历史 bug 中本体形变由距离瞬时驱动、能量流由 age 定时器驱动，
+                //      两者互不知情 → 拖动恒星时"轨迹与本体分离"。
+                {
+                    float tdx = bhCx - s.x, tdy = bhCy - s.y;
+                    float tr  = sqrtf(tdx * tdx + tdy * tdy) + 1e-4f;
+                    if (config.tidalEnabled && s.stage == STAGE_NORMAL) {
+                        float T = powf(config.tidalRadius / tr, 3.0f);
+                        if (T > 1.0f) {
+                            s.tidalProgress += config.tidalRate * T * (1.0f - s.tidalProgress) * dt;
+                        }
+                        // 决策：不可逆——被撕开即保持（重新生成恒星只需再点一次左键）
+                        s.tidalProgress = fmaxf(0.0f, fminf(0.96f, s.tidalProgress));
+                        // 形变幅度：单点公式（≈ (Λ-1)·stretch·0.30），本体与流共用同一数值
+                        s.tidalAmp = s.tidalProgress / (1.0f - s.tidalProgress)
+                                   * config.tidalStretch * 0.30f;
+                    } else {
+                        s.tidalProgress = 0.0f;
+                        s.tidalAmp      = 0.0f;
+                    }
+                }
 
                 // Neutron star rotates continuously
                 if (s.stage == STAGE_NEUTRON_STAR) {
@@ -2386,6 +2423,7 @@ int main(int argc, char** argv) {
                 }
                 if (suBHPos >= 0)       glUniform2f(suBHPos, bhCx, bhCy);
                 if (suBHInfluence >= 0) glUniform1f(suBHInfluence, tidalInfluence);
+                if (suTidalAmp >= 0)    glUniform1f(suTidalAmp, s.tidalAmp);
 
                 // ===== Evolution uniforms =====
                 if (suStarStage >= 0)            glUniform1i(suStarStage, (int)s.stage);
@@ -2534,6 +2572,14 @@ int main(int argc, char** argv) {
                     streamIntensity += closeBoost;
                 }
 
+                // 潮汐闸门：普通恒星的流必须正比于剥离进度 p。
+                // Why: baseIntensity 常驻 0.7 会让恒星刚生成、甚至远离黑洞时也拖着一条满长的流，
+                //      这正是"轨迹与本体分离"观感的来源之一。p = 0（未撕裂）→ 流不渲染。
+                // 白矮星 / 中子星 / 黑洞桥保持原常驻行为，避免回归。
+                if (activeStar->stage == STAGE_NORMAL) {
+                    streamIntensity *= activeStar->tidalProgress;
+                }
+
                 streamIntensity *= config.streamBright;
 
                 // BH->BH energy stream is more intense
@@ -2575,6 +2621,13 @@ int main(int argc, char** argv) {
                     }
                     if (euStreamColor >= 0)     glUniform3f(euStreamColor, streamR, streamG, streamB);
                     if (euStarAge >= 0)         glUniform1f(euStarAge, activeStar->age);
+                    // 潮汐模式仅在普通恒星启用；其余阶段传 -1 / 0 让 shader 走原有回退路径
+                    {
+                        bool tidalMode = config.tidalEnabled && activeStar->stage == STAGE_NORMAL;
+                        if (euTidalProgress >= 0) glUniform1f(euTidalProgress, tidalMode ? activeStar->tidalProgress : -1.0f);
+                        if (euTidalAmp >= 0)      glUniform1f(euTidalAmp, tidalMode ? activeStar->tidalAmp : 0.0f);
+                        if (euStarSize >= 0)      glUniform1f(euStarSize, activeStar->size);
+                    }
 
                     glBindVertexArray(vao);
                     glDrawArrays(0x0005/*GL_TRIANGLE_STRIP*/, 0, 4);

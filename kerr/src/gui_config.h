@@ -90,6 +90,13 @@ struct BlackholeConfig {
     float streamWidth         = 1.0f;    // energy stream width multiplier
     float streamSpiralTurns   = 2.0f;    // spiral turns around BH
 
+    // Tidal disruption (恒星潮汐撕裂)
+    // Why: 本体形变与能量流必须由同一物理量驱动，否则两者形态互相独立（历史 bug）
+    bool  tidalEnabled        = true;    // 总开关：关闭 → 形变幅度恒为 0，等价改动前行为
+    float tidalRadius         = 0.30f;   // 潮汐半径 r_t (UV)：仅 r < r_t 进入撕裂区
+    float tidalRate           = 1.2f;    // 剥离速率 k（p 的积分速率）
+    float tidalStretch        = 1.0f;    // 形变强度（本体与流共用的唯一来源，禁止两侧各写一份）
+
     // Stellar evolution (right-click triggered: star -> white dwarf -> neutron star -> black hole)
     bool  starEvolutionEnabled = true;   // right-click evolution on/off
     float evoExpandSpeed       = 0.25f;  // first right-click expansion speed
