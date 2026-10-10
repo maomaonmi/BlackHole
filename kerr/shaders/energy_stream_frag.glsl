@@ -17,6 +17,10 @@ uniform float uStarAge           = -1.0; // Dynamic star age sent from CPU (-1.0
 uniform float uTidalProgress     = -1.0;
 // 潮汐形变幅度：与 star_frag.glsl 使用同一数值（S4 不变量），0 = 未撕裂
 uniform float uTidalAmp          = 0.0;
+// 剥离物质流强度 strip = p^1.2（双量分离的"尾部主导"量）：只控制流的宽度/亮度/色温。
+// Why: 若用 tidalAmp 驱动流，则流在 p 较小时就已经很粗，撕裂"过程"被压缩成一次闪现。
+//      strip 是 p 的超线性函数，使流在撕裂后半程才爆发 → 过程感明显。
+uniform float uTidalStrip        = 0.0;
 // 本体真实半径（UV, aspect 校正）。>0 时用它与 uTidalAmp 精确对齐流起点，替代原有启发式
 uniform float uStarSize          = 0.0;
 
@@ -147,11 +151,14 @@ void main() {
     // 【S4 不变量】流的起点必须落在本体被拉伸后的鼻尖上。
     // 与 star_frag.glsl 使用同一个 uTidalAmp，因此两侧不可能各自漂移。
     float tidalAmp = max(uTidalAmp, 0.0);
+    // strip=0 时下面所有 mix/乘法都必须退回原值（G9：关闭开关完全等价改动前）
+    float strip = clamp(uTidalStrip, 0.0, 1.0);
     float starRadius;
     float noseWidth;
     if (tidalAmp > 0.0 && uStarSize > 0.0) {
         starRadius = uStarSize * (1.0 + tidalAmp);
-        // w 是流的半宽，因此取本体的半宽 R/(1+amp*0.55)（与 star_frag.glsl 的 expandPerp 同源）
+        // w 是流的半宽：必须与 star_frag.glsl 的 expandPerp = 1+amp*0.55 严格同源，
+        // 否则流起点与本体鼻尖错位（S4 交界不变量）。
         noseWidth  = max(uStarSize / (1.0 + tidalAmp * 0.55), 0.004);
     } else {
         starRadius = min(0.18, starToBH * 0.25);
@@ -189,7 +196,8 @@ void main() {
         // 尖头平滑收缩
         float lengthMask = smoothstep(tdeProgress, max(0.001, tdeProgress - 0.15), s);
 
-        float wBase = mix(noseWidth, 0.015, s) * lengthMask; 
+        // S4-b：尾端宽度随 strip 增粗（strip=0 → 0.015，与改动前逐位等价）
+        float wBase = mix(noseWidth, mix(0.015, 0.085, strip), s) * lengthMask; 
         wBase *= (0.8 + 0.5 * hash11(s * 100.0)); 
         wBase *= uStreamWidth; 
         float w = wBase * uStreamIntensity;
@@ -244,7 +252,9 @@ void main() {
             float scale = mix(1.0, cosI, abs(sin(theta_pixel)));
             float dist = d_flat * scale;
 
-            float sw = mix(0.015, 0.006, totalProg) * uStreamIntensity * uStreamWidth;
+            // S4-c：螺旋段宽度同样随 strip 增粗（strip=0 → 原式）
+            float sw = mix(0.015, 0.006, totalProg) * uStreamIntensity * uStreamWidth
+                     * (1.0 + 1.5 * strip);
 
             float dRatio = dist / sw;
             if (dRatio < bestDist) {
@@ -301,6 +311,10 @@ void main() {
 
     streamCol *= (structure * flicker);
 
+    // S4-e：剥离越深 → 物质被强引力/激波加热 → 色温向蓝白偏移（真实 TDE 的 UV/X 射线特征）。
+    // strip=0 时 mix 系数为 0，颜色与改动前逐位等价。
+    streamCol = mix(streamCol, vec3(0.72, 0.84, 1.0), strip * 0.55);
+
     // 【调节发光点 3】：白热核心管道粗细。你可以将 0.08 下调到 0.02 使白芯极细
     float core = smoothstep(0.08, 0.0, bestDist);
     vec3 coreColor = mix(vec3(1.0, 1.0, 1.0), starTint, 0.6) * 1.1;
@@ -315,7 +329,8 @@ void main() {
 
     // 【关键发光点 1：全局亮度总控】：
     // 你可以直接把 1.6 往更低调（如 0.8, 0.5, 0.3 等），整体流体就会非常温润自然，完全不刺眼！
-    streamCol *= uStreamIntensity * 0.5;
+    // S4-d：strip 越大整体越亮（strip=0 → ×0.5，与改动前逐位等价）
+    streamCol *= uStreamIntensity * 0.5 * (1.0 + 2.0 * strip);
 
     float alpha = clamp(mask * clamp(uStreamIntensity * 1.5, 0.0, 1.0), 0.0, 1.0);
 

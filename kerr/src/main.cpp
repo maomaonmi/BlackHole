@@ -248,8 +248,12 @@ struct StarObj {
     // Tidal disruption（恒星潮汐撕裂）
     // Why: 本体形变与能量流必须由同一物理量驱动；历史上二者分别用距离与 age，
     //      互不知情，导致"轨迹与本体分离"。
-    float tidalProgress;       // p: 剥离进度 [0, 0.96]，不可逆
-    float tidalAmp;            // 形变幅度（CPU 单点计算，本体与流共用 → S4 不变量）
+    // 双量分离（v2.0）：本体形变与剥离物质流是两个不同物理量的函数，不可混用。
+    //   tidalAmp   = stretch * p^0.8  → 有界，只负责本体轻微伸长
+    //   tidalStrip = p^1.2            → 只负责流的宽度/亮度/色温（尾部主导）
+    float tidalProgress;       // p: 剥离进度 [0, 1]，不可逆
+    float tidalAmp;            // 本体最大伸长率（有界，CPU 单点计算 → S4 不变量）
+    float tidalStrip;          // 剥离物质流强度（流 shader 专用）
 
     // Black hole merger
     MergerPhase mergerPhase;    // current merger phase
@@ -268,6 +272,11 @@ struct StarObj {
 static const int MAX_STARS = 3;
 static StarObj s_stars[MAX_STARS];
 static int s_starCount = 0;
+
+// 全局撕裂联动量 L ∈ [0,1]：每帧在恒星循环前清零，循环内取所有恒星的 max(strip)。
+// Why: 粒子吸积盘 / 主吸积盘 / 喷流 是全局单例资源，无法按恒星分别调制，
+//      因此需要一个帧级的"最大撕裂强度"来驱动它们的联动增益。
+static float s_tidalLink = 0.0f;
 
 // Shared collapse-effect state (computed in star update, applied to background next frame)
 static float s_evolveShake = 0.0f;     // 0..1 shake intensity (drives pixel offset)
@@ -949,7 +958,7 @@ int main(int argc, char** argv) {
     int suStarPos = -1, suStarSize = -1, suStarAlpha = -1;
     int suStarColor = -1, suCoronaSize = -1, suTime = -1;
     int suCoronaBright = -1, suFlareChance = -1, suResolution = -1;
-    int suBHPos = -1, suBHInfluence = -1;
+    int suBHPos = -1;
     int suTidalAmp = -1;
     int suStarTex = -1;
     // Evolution uniforms
@@ -989,7 +998,6 @@ int main(int argc, char** argv) {
                 suFlareChance  = glGetUniformLocation(starProgram, "uFlareChance");
                 suResolution   = glGetUniformLocation(starProgram, "uResolution");
                 suBHPos        = glGetUniformLocation(starProgram, "uBHPos");
-                suBHInfluence  = glGetUniformLocation(starProgram, "uBHInfluence");
                 suTidalAmp     = glGetUniformLocation(starProgram, "uTidalAmp");
                 suStarTex      = glGetUniformLocation(starProgram, "uStarTex");
                 // Evolution uniforms
@@ -1041,7 +1049,7 @@ int main(int argc, char** argv) {
     int euTime = -1, euResolution = -1;
     int euStreamWidth = -1, euSpiralTurns = -1, euStreamColor = -1;
     int euStarAge = -1;
-    int euTidalProgress = -1, euTidalAmp = -1, euStarSize = -1;
+    int euTidalProgress = -1, euTidalAmp = -1, euStarSize = -1, euTidalStrip = -1;
 
     printf("[BlackHole] Energy stream shaders: vert=%zu bytes, frag=%zu bytes\n", eVertSrc.size(), eFragSrc.size());
 
@@ -1071,6 +1079,7 @@ int main(int argc, char** argv) {
                 euTidalProgress   = glGetUniformLocation(energyProgram, "uTidalProgress");
                 euTidalAmp        = glGetUniformLocation(energyProgram, "uTidalAmp");
                 euStarSize        = glGetUniformLocation(energyProgram, "uStarSize");
+                euTidalStrip      = glGetUniformLocation(energyProgram, "uTidalStrip");
                 printf("[BlackHole] Energy stream shader program linked OK\n");
             }
         }
@@ -1459,6 +1468,11 @@ int main(int argc, char** argv) {
             if (tiltXCos < 0.05f) tiltXCos = 0.05f;
             if (tiltYCos < 0.05f) tiltYCos = 0.05f;
 
+            // S5 联动：恒星潮汐剥离的物质最终汇入吸积盘 → 粒子盘亮度随撕裂强度提升。
+            // Why: 只调顶点 alpha 增益，绝不改 particleCount（那会触发全量重生、打乱盘面结构）。
+            // 注：s_tidalLink 由恒星更新循环写入，这里读到的是上一帧的值（1 帧滞后，约 16ms，不可见）。
+            const float particleLinkBoost = 1.0f + 1.5f * s_tidalLink;
+
             for (int i = 0; i < s_activeParticleCount; i++) {
                 Particle& p = s_particles[i];
                 int n = p.trailCount;
@@ -1466,8 +1480,8 @@ int main(int argc, char** argv) {
                 for (int j = 0; j < n - 1 && vertexCount + 6 <= MAX_PARTICLES * (MAX_TRAIL_LENGTH - 1) * 6; j++) {
                     float t0 = (float)(j + 0) / (float)(s_trailLength - 1);
                     float t1 = (float)(j + 1) / (float)(s_trailLength - 1);
-                    float a0 = (1.0f - t0) * p.life;
-                    float a1 = (1.0f - t1) * p.life;
+                    float a0 = (1.0f - t0) * p.life * particleLinkBoost;
+                    float a1 = (1.0f - t1) * p.life * particleLinkBoost;
                     if (a0 < 0.005f && a1 < 0.005f) continue;
 
                     // Apply three-axis tilt: Z rotation -> Y tilt -> X tilt
@@ -1529,7 +1543,8 @@ int main(int argc, char** argv) {
                         float cxp = bhCx + rx * tiltZCos + ry * tiltZSin;
                         float cyp = bhCy + -rx * tiltZSin + ry * tiltZCos;
                         float r = sqrtf((cxp - bhCx) * (cxp - bhCx) + (cyp - bhCy) * (cyp - bhCy));
-                        float cloudAlpha = 0.15f * (1.0f - (float)j / (float)(s_trailLength - 1)) * p.life;
+                        float cloudAlpha = 0.15f * (1.0f - (float)j / (float)(s_trailLength - 1))
+                                         * p.life * particleLinkBoost;
                         if (cloudAlpha < 0.01f) continue;
                         float angle = RandomFloat() * 6.2831853f;
                         float dist = (0.02f + r * 0.15f) * (0.5f + RandomFloat());
@@ -1648,6 +1663,12 @@ int main(int argc, char** argv) {
             effectiveDiskBeam     *= 1.5f;
         }
 
+        // S5 联动：恒星剥离的物质落到吸积盘上 → 盘面整体增亮（乘性增益，不改几何）。
+        // 同样存在 1 帧滞后（s_tidalLink 由恒星更新循环写入）。
+        if (config.tidalLinkAccretion > 0.0f) {
+            effectiveDiskGain *= (1.0f + 0.8f * s_tidalLink * config.tidalLinkAccretion);
+        }
+
         // Shader parameter overrides from config
         // -1.0 = use shader default (uniform <= 0 triggers default in patched shader)
         if (uHoleRadius >= 0) glUniform1f(uHoleRadius, effectiveHoleRadius);
@@ -1673,11 +1694,15 @@ int main(int argc, char** argv) {
         if (uTimeDilation >= 0) glUniform1f(uTimeDilation, config.timeDilation);
 
         // Jet uniforms
-        if (uJetEnabled >= 0)    glUniform1f(uJetEnabled,    config.jetEnabled ? 1.0f : 0.0f);
+        // S5 联动：撕裂事件本身会驱动极区喷流（TDE 的经典观测特征）。
+        // 联动量 L > 0.25 时自动开启喷流，且亮度随 L 放大；用户手动开启时保持原行为。
+        float jetLinkBoost = 1.0f + 2.0f * s_tidalLink * config.tidalLinkAccretion;
+        bool  jetAutoOn    = config.tidalLinkAccretion > 0.0f && s_tidalLink > 0.25f;
+        if (uJetEnabled >= 0)    glUniform1f(uJetEnabled,    (config.jetEnabled || jetAutoOn) ? 1.0f : 0.0f);
         if (uJetLength >= 0)     glUniform1f(uJetLength,     config.jetLength);
         if (uJetWidth >= 0)      glUniform1f(uJetWidth,      config.jetWidth);
         if (uJetSpeed >= 0)      glUniform1f(uJetSpeed,      config.jetSpeed);
-        if (uJetBrightness >= 0) glUniform1f(uJetBrightness, config.jetBrightness);
+        if (uJetBrightness >= 0) glUniform1f(uJetBrightness, config.jetBrightness * jetLinkBoost);
 
         // Kerr metric uniforms
         if (uSpinParam >= 0) glUniform1f(uSpinParam, config.kerrMode ? config.spinParam : 0.0f);
@@ -1866,6 +1891,7 @@ int main(int argc, char** argv) {
                     s.vy = 0.0f;
                     s.tidalProgress = 0.0f;
                     s.tidalAmp      = 0.0f;
+                    s.tidalStrip    = 0.0f;
                     // Merger fields init
                     s.mergerPhase = MERGER_IDLE;
                     s.mergerTimer = 0.0f;
@@ -1954,6 +1980,8 @@ int main(int argc, char** argv) {
             mKeyWasDown = mKeyDown;
 
             // Update stars
+            // 帧级联动量在此清零：循环内取所有恒星的 max(strip)，供吸积盘/喷流联动使用
+            s_tidalLink = 0.0f;
             for (int i = 0; i < s_starCount; i++) {
                 StarObj& s = s_stars[i];
                 if (s.state == STAR_DEAD) continue;
@@ -1961,26 +1989,40 @@ int main(int argc, char** argv) {
                 s.age += dt;
 
                 // ===== 潮汐撕裂积分（S1：本体与能量流共用的唯一物理量）=====
-                // 潮汐强度按牛顿潮汐加速度差标度 ∝ r^-3；p 同时随距离与时间演化。
-                // Why: 历史 bug 中本体形变由距离瞬时驱动、能量流由 age 定时器驱动，
-                //      两者互不知情 → 拖动恒星时"轨迹与本体分离"。
+                // 物理：牛顿潮汐加速度差 Δa ∝ 2GMR*/r³ ⇒ 形变率 ∝ (r_t/r)³。
+                //   β      = r_t / r                         （穿透因子，越大越深入）
+                //   T      = clamp(β, 1, β_max)              （有界潮汐强度，禁止无上界发散）
+                //   q      = (T - 1) / (β_max - 1) ∈ [0,1]   （归一化强度）
+                //   dp/dt  = (0.15 + 0.85·q^0.6) / t_dis     （时间量纲锚点：t_dis 秒完成 0→1）
+                // Why: v1.x 用 T=β³ 无上界，β 很大时 τ→0，全流程仅约 15 帧 → "瞬间被拉长"。
+                //      有界化后 r=r_t 处 t_full = t_dis，最深入态 t_full = t_dis/1.0。
                 {
-                    float tdx = bhCx - s.x, tdy = bhCy - s.y;
+                    // aspect 校正：shader 在 (x·aspect, y) 空间判定距离，
+                    // CPU 必须使用同一空间的度量，否则撕裂区在屏幕上是椭圆（教训 C4）。
+                    float tdx = (bhCx - s.x) * mainAspect;
+                    float tdy = bhCy - s.y;
                     float tr  = sqrtf(tdx * tdx + tdy * tdy) + 1e-4f;
                     if (config.tidalEnabled && s.stage == STAGE_NORMAL) {
-                        float T = powf(config.tidalRadius / tr, 3.0f);
-                        if (T > 1.0f) {
-                            s.tidalProgress += config.tidalRate * T * (1.0f - s.tidalProgress) * dt;
+                        float beta    = config.tidalRadius / tr;
+                        float betaMax = fmaxf(config.tidalBetaMax, 1.0001f);
+                        if (beta > 1.0f) {
+                            float T    = fminf(beta, betaMax);
+                            float q    = (T - 1.0f) / (betaMax - 1.0f);
+                            float rate = (0.15f + 0.85f * powf(q, 0.6f))
+                                       / fmaxf(config.tidalDisruptSec, 0.1f);
+                            s.tidalProgress += rate * dt;
                         }
                         // 决策：不可逆——被撕开即保持（重新生成恒星只需再点一次左键）
-                        s.tidalProgress = fmaxf(0.0f, fminf(0.96f, s.tidalProgress));
-                        // 形变幅度：单点公式（≈ (Λ-1)·stretch·0.30），本体与流共用同一数值
-                        s.tidalAmp = s.tidalProgress / (1.0f - s.tidalProgress)
-                                   * config.tidalStretch * 0.30f;
+                        s.tidalProgress = fmaxf(0.0f, fminf(1.0f, s.tidalProgress));
+                        // 双量分离：本体形变有界且只占一小部分；流强度由 strip 主导（尾部爆发）
+                        s.tidalAmp   = config.tidalStretch * powf(s.tidalProgress, 0.8f);
+                        s.tidalStrip = powf(s.tidalProgress, 1.2f);
                     } else {
                         s.tidalProgress = 0.0f;
                         s.tidalAmp      = 0.0f;
+                        s.tidalStrip    = 0.0f;
                     }
+                    if (s.tidalStrip > s_tidalLink) s_tidalLink = s.tidalStrip;
                 }
 
                 // Neutron star rotates continuously
@@ -2412,18 +2454,11 @@ int main(int argc, char** argv) {
                 if (suCoronaBright >= 0) glUniform1f(suCoronaBright, config.starCoronaBright);
                 if (suFlareChance >= 0) glUniform1f(suFlareChance, config.starFlareChance);
 
-                // Black hole tidal influence: teardrop deformation when star is near BH
-                float dxBH = s.x - bhCx;
-                float dyBH = s.y - bhCy;
-                float distBH = sqrtf(dxBH * dxBH + dyBH * dyBH);
-                float tidalInfluence = 0.0f;
-                if (distBH < 0.8f && distBH > 0.005f) {
-                    tidalInfluence = fmaxf(0.0f, 1.0f - distBH / 0.8f);
-                    tidalInfluence = powf(tidalInfluence, 1.5f); // smooth falloff
-                }
-                if (suBHPos >= 0)       glUniform2f(suBHPos, bhCx, bhCy);
-                if (suBHInfluence >= 0) glUniform1f(suBHInfluence, tidalInfluence);
-                if (suTidalAmp >= 0)    glUniform1f(suTidalAmp, s.tidalAmp);
+                // 潮汐形变：唯一来源是 CPU 积分得到的 s.tidalAmp（有界）。
+                // Why: 删除原先按距离即时计算的 uBHInfluence 回退路径——它会在开关关闭时
+                //      用"距离"驱动形变，与本轮的"时间积分"语义冲突（双驱动源 = 历史 bug 根因）。
+                if (suBHPos >= 0)    glUniform2f(suBHPos, bhCx, bhCy);
+                if (suTidalAmp >= 0) glUniform1f(suTidalAmp, s.tidalAmp);
 
                 // ===== Evolution uniforms =====
                 if (suStarStage >= 0)            glUniform1i(suStarStage, (int)s.stage);
@@ -2572,11 +2607,12 @@ int main(int argc, char** argv) {
                     streamIntensity += closeBoost;
                 }
 
-                // 潮汐闸门：普通恒星的流必须正比于剥离进度 p。
+                // 潮汐闸门：开启撕裂时，普通恒星的流强度正比于剥离进度 p。
                 // Why: baseIntensity 常驻 0.7 会让恒星刚生成、甚至远离黑洞时也拖着一条满长的流，
                 //      这正是"轨迹与本体分离"观感的来源之一。p = 0（未撕裂）→ 流不渲染。
-                // 白矮星 / 中子星 / 黑洞桥保持原常驻行为，避免回归。
-                if (activeStar->stage == STAGE_NORMAL) {
+                // 关闭开关时必须严格等价改动前行为，因此闸门必须受 tidalEnabled 保护
+                // （否则 tidalProgress 恒为 0 → 普通恒星的能量流完全不渲染，违反 G9）。
+                if (config.tidalEnabled && activeStar->stage == STAGE_NORMAL) {
                     streamIntensity *= activeStar->tidalProgress;
                 }
 
@@ -2626,6 +2662,7 @@ int main(int argc, char** argv) {
                         bool tidalMode = config.tidalEnabled && activeStar->stage == STAGE_NORMAL;
                         if (euTidalProgress >= 0) glUniform1f(euTidalProgress, tidalMode ? activeStar->tidalProgress : -1.0f);
                         if (euTidalAmp >= 0)      glUniform1f(euTidalAmp, tidalMode ? activeStar->tidalAmp : 0.0f);
+                        if (euTidalStrip >= 0)    glUniform1f(euTidalStrip, tidalMode ? activeStar->tidalStrip : 0.0f);
                         if (euStarSize >= 0)      glUniform1f(euStarSize, activeStar->size);
                     }
 

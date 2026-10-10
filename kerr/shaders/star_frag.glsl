@@ -13,9 +13,10 @@ uniform float uCoronaBright;
 uniform float uFlareChance;
 uniform vec2  uResolution;
 uniform vec2  uBHPos;
-uniform float uBHInfluence;
 // 潮汐形变幅度：由 CPU 统一积分剥离进度后计算（本体与能量流共用同一数值，S4 不变量）。
-// == 0 表示未撕裂（或开关关闭），此时退回原有的距离型影响量 uBHInfluence。
+// == 0 表示未撕裂（或开关关闭）→ 完全无形变。
+// Why: v1.x 曾在这里保留一条"距离型"回退路径（uBHInfluence），它会在开关关闭时用距离
+//      驱动形变，与本轮的时间积分语义冲突（双驱动源 = 历史 bug 根因），已删除。
 uniform float uTidalAmp;
 
 // Stellar evolution uniforms
@@ -670,38 +671,31 @@ void main() {
     float R = max(uStarSize, 1e-5);
 
     // ===== 潮汐撕裂形变（仅普通恒星）=====
-    // 路径 A(uTidalAmp > 0)：形变量由 CPU 统一积分的剥离进度导出，与能量流严格同源；
-    // 路径 B(uTidalAmp == 0)：退回原有距离型影响量 uBHInfluence，保证关闭开关时行为不变。
+    // 唯一驱动源 uTidalAmp（CPU 由剥离进度 p 积分得到，有界 [0, tidalStretch]）。
+    // 逆向映射：把采样坐标 d 沿"指向黑洞"方向收缩 → 屏幕上形体朝黑洞伸长。
     if (uStarStage == 0) {
         vec2 bd = uBHPos - uStarPos;
         bd.x *= aspect;
         float bdLen = length(bd);
-        if (bdLen > 0.001) {
+        float amp = max(uTidalAmp, 0.0);
+        if (bdLen > 0.001 && amp > 0.001) {
             vec2 bdNorm = bd / bdLen;
             vec2 bdPerp = vec2(-bdNorm.y, bdNorm.x);
 
             float dParallel = dot(d, bdNorm);  // positive = toward BH
             float dPerp     = dot(d, bdPerp);
 
-            float amp = uTidalAmp > 0.0 ? uTidalAmp : uBHInfluence;
+            // 非对称：朝黑洞一侧拉得更长（鼻部），背侧轻微（尾部）
+            float stretchToward = 1.0 + amp;
+            float stretchAway   = 1.0 + amp * 0.2;
+            // 横向压缩 0.55：与 energy_stream_frag.glsl 的 noseWidth = R/(1+amp*0.55) 严格同源。
+            // 【交界不变量 S4】两侧改一处忘一处 → 流起点与本体鼻尖立刻错位。
+            float expandPerp    = 1.0 + amp * 0.55;
 
-            if (amp > 0.001) {
-                // Asymmetric: stronger stretch toward BH (long nose), milder away (short tail)
-                float stretchToward = 1.0 + amp;
-                float stretchAway   = 1.0 + amp * 0.2;
-                float expandPerp    = 1.0 + amp * 0.2;
+            dParallel /= (dParallel > 0.0 ? stretchToward : stretchAway);
+            dPerp     *= expandPerp;
 
-                float parallelScale = dParallel > 0.0 ? stretchToward : stretchAway;
-                // 遗留的鼻部渐细项只在回退路径保留：它对幅度是二次增长，
-                // 高幅度下会把鼻尖推到 R·(1+amp)² 量级，破坏与流起点的解析对齐（S4）。
-                if (uTidalAmp <= 0.0 && dParallel > 0.0) {
-                    parallelScale *= 1.0 + (dParallel / R) * amp * 0.1;
-                }
-                dParallel /= parallelScale;
-                dPerp *= expandPerp;
-
-                d = dParallel * bdNorm + dPerp * bdPerp;
-            }
+            d = dParallel * bdNorm + dPerp * bdPerp;
         }
     }
 

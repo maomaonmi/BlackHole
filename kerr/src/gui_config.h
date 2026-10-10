@@ -92,10 +92,13 @@ struct BlackholeConfig {
 
     // Tidal disruption (恒星潮汐撕裂)
     // Why: 本体形变与能量流必须由同一物理量驱动，否则两者形态互相独立（历史 bug）
-    bool  tidalEnabled        = true;    // 总开关：关闭 → 形变幅度恒为 0，等价改动前行为
+    bool  tidalEnabled        = true;    // 总开关：关闭 → p/amp/strip 全为 0，严格等价改动前行为
     float tidalRadius         = 0.30f;   // 潮汐半径 r_t (UV)：仅 r < r_t 进入撕裂区
-    float tidalRate           = 1.2f;    // 剥离速率 k（p 的积分速率）
-    float tidalStretch        = 1.0f;    // 形变强度（本体与流共用的唯一来源，禁止两侧各写一份）
+    float tidalDisruptSec     = 5.0f;    // 恰好落在 r_t 时从 0 剥到 1 所需秒数（时间量纲锚点）
+    float tidalBetaMax        = 3.0f;    // 穿透因子上限 β_max：β = r_t/r 的截断（决定最快撕裂速度）
+    float tidalStretch        = 0.6f;    // 本体最大伸长率 amp_body|max（有界；不再随 p 发散）
+    float tidalBodyFade       = 1.0f;    // 本体消散强度 [0,1]：α_body = 1 - fade*smoothstep(0.35,1,p)
+    float tidalLinkAccretion  = 1.0f;    // 吸积盘/喷流联动增益 L：[0,1]，=0 则关闭联动
 
     // Stellar evolution (right-click triggered: star -> white dwarf -> neutron star -> black hole)
     bool  starEvolutionEnabled = true;   // right-click evolution on/off
