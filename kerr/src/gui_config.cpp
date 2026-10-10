@@ -106,6 +106,11 @@ void Config_SetDefaults(BlackholeConfig* cfg) {
     cfg->starWindCount      = 1500;
     cfg->starWindBright     = 0.8f;
     cfg->starLensStrength   = 0.3f;
+    cfg->starGasOpacity     = 3.2f;
+    cfg->starChromoScale    = 1.75f;
+    cfg->starCoronaFalloff  = 1.10f;
+    cfg->starStreakAmount   = 0.90f;
+    cfg->starStreakSpeed    = 3.50f;
     cfg->starInteractEnabled = true;
     cfg->starAbsorbRadius    = 0.25f;
     cfg->starAbsorbSpeed     = 0.03f;
@@ -113,7 +118,10 @@ void Config_SetDefaults(BlackholeConfig* cfg) {
     cfg->streamWidth         = 1.0f;
     cfg->streamSpiralTurns   = 2.0f;
     cfg->tidalEnabled        = true;
-    cfg->tidalRadius         = 0.30f;
+    // 【G2-A 实机反馈修正】0.30 时恒星（最大 0.25 UV）几乎贴到黑洞阴影（0.133 UV）才开撕，
+    //   静态恒星永远不满足 beta>1 → p 恒为 0 → 能量流被钉死在底噪长度（"中逤断掉"的主因）。
+    //   0.50 使恒星在视觉上接近黑洞即触发撕裂。滑块范围 0.05~0.60 已覆盖。
+    cfg->tidalRadius         = 0.50f;
     cfg->tidalDisruptSec     = 5.0f;
     cfg->tidalBetaMax        = 3.0f;
     cfg->tidalStretch        = 0.6f;
@@ -163,6 +171,12 @@ void Config_SetDefaults(BlackholeConfig* cfg) {
     cfg->iconDevourStagger    = 0.15f;
     cfg->iconDevourThrottleHz = 30;
     cfg->iconDevourRestore    = true;
+
+    cfg->winDevourEnabled = true;
+    cfg->winDevourRate    = 0.35f;
+    cfg->winDevourSpin    = 1.2f;
+    cfg->winDevourWarp    = 1.0f;
+    cfg->winDevourStagger = 0.15f;
 }
 
 void Config_InitBuiltInPresets(BlackholeConfig* cfg) {
@@ -253,6 +267,11 @@ bool Config_Save(const BlackholeConfig* cfg, const char* path) {
     f << "starCoronaBright=" << cfg->starCoronaBright << "\n";
     f << "starFlareChance=" << cfg->starFlareChance << "\n";
     f << "starColorShift=" << cfg->starColorShift << "\n";
+    f << "starGasOpacity=" << cfg->starGasOpacity << "\n";
+    f << "starChromoScale=" << cfg->starChromoScale << "\n";
+    f << "starCoronaFalloff=" << cfg->starCoronaFalloff << "\n";
+    f << "starStreakAmount=" << cfg->starStreakAmount << "\n";
+    f << "starStreakSpeed=" << cfg->starStreakSpeed << "\n";
     f << "starWindEnabled=" << (cfg->starWindEnabled ? 1 : 0) << "\n";
     f << "starWindSpeed=" << cfg->starWindSpeed << "\n";
     f << "starWindCount=" << cfg->starWindCount << "\n";
@@ -310,6 +329,11 @@ bool Config_Save(const BlackholeConfig* cfg, const char* path) {
     f << "iconDevourStagger=" << cfg->iconDevourStagger << "\n";
     f << "iconDevourThrottleHz=" << cfg->iconDevourThrottleHz << "\n";
     f << "iconDevourRestore=" << (cfg->iconDevourRestore ? 1 : 0) << "\n";
+    f << "winDevourEnabled=" << (cfg->winDevourEnabled ? 1 : 0) << "\n";
+    f << "winDevourRate=" << cfg->winDevourRate << "\n";
+    f << "winDevourSpin=" << cfg->winDevourSpin << "\n";
+    f << "winDevourWarp=" << cfg->winDevourWarp << "\n";
+    f << "winDevourStagger=" << cfg->winDevourStagger << "\n";
     f << "displayMode=" << cfg->displayMode << "\n";
     f << "idleSeconds=" << cfg->idleSeconds << "\n";
     f << "playMode=" << cfg->playMode << "\n";
@@ -404,6 +428,11 @@ bool Config_Load(BlackholeConfig* cfg, const char* path) {
         else if (key == "starCoronaBright")   cfg->starCoronaBright = ParseFloat(val, 0.7f);
         else if (key == "starFlareChance")    cfg->starFlareChance  = ParseFloat(val, 0.5f);
         else if (key == "starColorShift")     cfg->starColorShift   = ParseFloat(val, 0.15f);
+        else if (key == "starGasOpacity")     cfg->starGasOpacity   = ParseFloat(val, 3.2f);
+        else if (key == "starChromoScale")    cfg->starChromoScale  = ParseFloat(val, 1.75f);
+        else if (key == "starCoronaFalloff")  cfg->starCoronaFalloff= ParseFloat(val, 1.10f);
+        else if (key == "starStreakAmount")   cfg->starStreakAmount = ParseFloat(val, 0.90f);
+        else if (key == "starStreakSpeed")    cfg->starStreakSpeed  = ParseFloat(val, 3.50f);
         else if (key == "starWindEnabled")    cfg->starWindEnabled  = ParseInt(val, 1) != 0;
         else if (key == "starWindSpeed")      cfg->starWindSpeed    = ParseFloat(val, 1.0f);
         else if (key == "starWindCount")      cfg->starWindCount    = ParseInt(val, 1500);
@@ -416,7 +445,7 @@ bool Config_Load(BlackholeConfig* cfg, const char* path) {
         else if (key == "streamWidth")         cfg->streamWidth         = ParseFloat(val, 1.0f);
         else if (key == "streamSpiralTurns")   cfg->streamSpiralTurns   = ParseFloat(val, 2.0f);
         else if (key == "tidalEnabled")        cfg->tidalEnabled        = ParseInt(val, 1) != 0;
-        else if (key == "tidalRadius")         cfg->tidalRadius         = ParseFloat(val, 0.30f);
+        else if (key == "tidalRadius")         cfg->tidalRadius         = ParseFloat(val, 0.50f);
         else if (key == "tidalDisruptSec")     cfg->tidalDisruptSec     = ParseFloat(val, 5.0f);
         else if (key == "tidalBetaMax")        cfg->tidalBetaMax        = ParseFloat(val, 3.0f);
         else if (key == "tidalStretch")        cfg->tidalStretch        = ParseFloat(val, 0.6f);
@@ -461,6 +490,11 @@ bool Config_Load(BlackholeConfig* cfg, const char* path) {
         else if (key == "iconDevourStagger")    cfg->iconDevourStagger    = ParseFloat(val, 0.15f);
         else if (key == "iconDevourThrottleHz") cfg->iconDevourThrottleHz = ParseInt(val, 30);
         else if (key == "iconDevourRestore")    cfg->iconDevourRestore    = ParseInt(val, 1) != 0;
+        else if (key == "winDevourEnabled")     cfg->winDevourEnabled     = ParseInt(val, 1) != 0;
+        else if (key == "winDevourRate")        cfg->winDevourRate        = ParseFloat(val, 0.35f);
+        else if (key == "winDevourSpin")        cfg->winDevourSpin        = ParseFloat(val, 1.2f);
+        else if (key == "winDevourWarp")        cfg->winDevourWarp        = ParseFloat(val, 1.0f);
+        else if (key == "winDevourStagger")     cfg->winDevourStagger     = ParseFloat(val, 0.15f);
         else if (key == "displayMode") cfg->displayMode = ParseInt(val, 1);
         else if (key == "idleSeconds") cfg->idleSeconds = ParseInt(val, 300);
         else if (key == "playMode")    cfg->playMode = ParseInt(val, 0);
@@ -908,6 +942,14 @@ void GUI_Render(BlackholeConfig* cfg) {
         ImGui::SliderFloat(u8"\u989C\u8272\u53D8\u5316\u901F\u7387", &cfg->starColorShift, 0.0f, 0.5f, u8"%.2f"); // 颜色变化速率
 
         ImGui::Spacing();
+        ImGui::TextUnformatted(u8"\u6C14\u4F53\u6750\u8D28"); // 气体材质
+        ImGui::SliderFloat(u8"\u5149\u7403\u4E0D\u900F\u660E\u5EA6", &cfg->starGasOpacity,    0.5f, 8.0f, u8"%.2f"); // k1 光球吸收系数
+        ImGui::SliderFloat(u8"\u8272\u7403\u5C3A\u5EA6",     &cfg->starChromoScale,   1.0f, 3.0f, u8"%.2f"); // L2 色球尺度倍数
+        ImGui::SliderFloat(u8"\u65E5\u5195\u8870\u51CF\u7387", &cfg->starCoronaFalloff, 0.5f, 4.0f, u8"%.2f"); // L3 日冕衰减率（乘法，越大越薄；1.10 ≈ 旧外观）
+        ImGui::SliderFloat(u8"\u62C9\u4E1D\u5F3A\u5EA6",     &cfg->starStreakAmount,  0.0f, 2.0f, u8"%.2f"); // 拉丝调制强度
+        ImGui::SliderFloat(u8"\u62C9\u4E1D\u901F\u5EA6",     &cfg->starStreakSpeed,   0.0f, 8.0f, u8"%.2f"); // 拉丝相速度增益
+
+        ImGui::Spacing();
         ImGui::Checkbox(u8"\u592A\u9633\u98CE", &cfg->starWindEnabled); // 太阳风
         if (cfg->starWindEnabled) {
             ImGui::SliderFloat(u8"\u98CE\u901F", &cfg->starWindSpeed, 0.1f, 3.0f, u8"%.1f"); // 风速
@@ -937,7 +979,8 @@ void GUI_Render(BlackholeConfig* cfg) {
             ImGui::SliderFloat(u8"\u6F6E\u6C50\u534A\u5F84", &cfg->tidalRadius, 0.05f, 0.60f, u8"%.2f");      // 潮汐半径
             ImGui::SliderFloat(u8"\u6495\u88C2\u65F6\u957F", &cfg->tidalDisruptSec, 1.0f, 20.0f, u8"%.1fs"); // 撕裂时长 (r=r_t 时 p: 0->1)
             ImGui::SliderFloat(u8"\u7A7F\u900F\u4E0A\u9650", &cfg->tidalBetaMax, 1.2f, 8.0f, u8"%.1f");      // 穿透上限 beta_max
-            ImGui::SliderFloat(u8"\u5F62\u53D8\u5F3A\u5EA6", &cfg->tidalStretch, 0.0f, 2.0f, u8"%.2f");      // 本体最大伸长率
+            // 上限由 2.0 收紧到 1.2（RK4）：amp 过大时 σ_P 会把本体压成一条线，破坏体积感
+            ImGui::SliderFloat(u8"\u5F62\u53D8\u5F3A\u5EA6", &cfg->tidalStretch, 0.0f, 1.2f, u8"%.2f");      // 本体最大伸长率
             ImGui::SliderFloat(u8"\u672C\u4F53\u6D88\u6563", &cfg->tidalBodyFade, 0.0f, 1.0f, u8"%.2f");     // 本体消散强度
             ImGui::SliderFloat(u8"\u5438\u79EF\u8054\u52A8", &cfg->tidalLinkAccretion, 0.0f, 1.0f, u8"%.2f");// 吸积/喷流联动增益
         }
@@ -1047,6 +1090,19 @@ void GUI_Render(BlackholeConfig* cfg) {
             DesktopIcons_Restore();
         }
         ImGui::TextWrapped(u8"\u72B6\u6001: %s", DesktopIcons_LastError()); // 状态
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    // ---- 进程窗口螺旋吞噬（Window Devour，中键触发）----
+    if (ImGui::CollapsingHeader(u8"\u7A97\u53E3\u541E\u566C (Window Devour)")) { // 窗口吞噬
+        ImGui::Checkbox(u8"\u542F\u7528\u7A97\u53E3\u541E\u566C", &cfg->winDevourEnabled); // 启用窗口吞噬
+        ImGui::SliderFloat(u8"\u5185\u7F29\u901F\u7387", &cfg->winDevourRate, 0.05f, 2.0f, u8"%.2f"); // 内缩速率
+        ImGui::SliderFloat(u8"\u65CB\u8F6C\u89D2\u901F\u5EA6", &cfg->winDevourSpin, 0.0f, 6.0f, u8"%.2f"); // 旋转角速度
+        ImGui::SliderFloat(u8"\u87BA\u65CB\u626D\u66F2", &cfg->winDevourWarp, 0.0f, 3.0f, u8"%.2f"); // 螺旋扭曲
+        ImGui::SliderFloat(u8"\u9519\u5CF0\u95F4\u9694", &cfg->winDevourStagger, 0.0f, 1.0f, u8"%.3f"); // 错峰间隔
+        ImGui::TextWrapped(u8"\u4E2D\u952E\u89E6\u53D1\uFF1A\u541E\u566C\u5F53\u524D\u5C4F\u5E55\u7A97\u53E3\uFF08\u9690\u85CF\u4E0D\u8FD8\u539F\uFF09"); // 中键触发：吞噬当前屏幕窗口（隐藏不还原）
     }
 
     ImGui::Spacing();

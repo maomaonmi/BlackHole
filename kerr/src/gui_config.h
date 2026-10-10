@@ -82,6 +82,16 @@ struct BlackholeConfig {
     float starWindBright     = 0.8f;    // solar wind brightness
     float starLensStrength   = 0.3f;    // gravitational lensing strength
 
+    // 恒星分层体积气体材质（L1 光球 / L2 色球 / L3 日冕）
+    // Why: v1.x~v2.1 的恒星是"实心光球"（photoAlpha 硬编码 1.0 → 硬边不透明盘）。
+    //      这几个旋钮把密度场（Beer–Lambert 吸收）暴露出来，使恒星有体积与层次感。
+    //      D1：材质全局常开，不受 tidalEnabled 影响（关闭撕裂开关不应退回实心球）。
+    float starGasOpacity     = 3.2f;    // k₁ 光球吸收系数：越大越实、越小越透
+    float starChromoScale    = 1.75f;   // L2 色球相对 L1 的尺度倍数
+    float starCoronaFalloff  = 1.10f;   // L3 日冕衰减常数（取代硬编码 3.0）
+    float starStreakAmount   = 0.90f;   // 拉丝对密度的调制强度（0 = 关闭拉丝）
+    float starStreakSpeed    = 3.50f;   // 拉丝相速度随 strip 的增益
+
     // Star-BH interaction (energy stream)
     bool  starInteractEnabled = true;    // star-BH interaction on/off
     float starAbsorbRadius    = 0.25f;   // absorption trigger radius
@@ -148,6 +158,13 @@ struct BlackholeConfig {
     float iconDevourStagger   = 0.15f;   // 错峰间隔（秒 / 图标）
     int   iconDevourThrottleHz= 30;      // 坐标下发频率
     bool  iconDevourRestore   = true;    // 停止时是否还原
+
+    // ---- Window devour（进程窗口螺旋吞噬，中键触发）----
+    bool  winDevourEnabled  = true;    // 功能总开关（中键触发）
+    float winDevourRate     = 0.35f;   // 内缩速率 λ（与图标吞噬同方程）
+    float winDevourSpin     = 1.2f;    // 公转角速度 ω
+    float winDevourWarp     = 1.0f;    // 片元级螺旋扭曲增益
+    float winDevourStagger  = 0.15f;   // 错峰间隔（秒 / 窗口）
 
     // Smoothed values (lerped toward target each frame)
     float smoothHoleRadius = -1.0f;

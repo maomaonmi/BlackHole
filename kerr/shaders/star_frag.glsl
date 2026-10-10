@@ -18,6 +18,16 @@ uniform vec2  uBHPos;
 // Why: v1.x 曾在这里保留一条"距离型"回退路径（uBHInfluence），它会在开关关闭时用距离
 //      驱动形变，与本轮的时间积分语义冲突（双驱动源 = 历史 bug 根因），已删除。
 uniform float uTidalAmp;
+// 分层体积气体材质（T3~T5）。D1：材质全局常开，不受 uTidalAmp / tidalEnabled 影响。
+uniform float uGasOpacity      = 3.2;    // k₁ 光球吸收系数（越大越实、越小越透）
+uniform float uChromoScale     = 1.75;   // L2 色球相对 L1 的尺度倍数
+uniform float uCoronaFalloff   = 1.10;   // L3 日冕衰减常数（取代旧硬编码 3.0）
+uniform float uStreakAmount    = 0.90;   // 拉丝对密度的调制强度（0 = 无拉丝）
+uniform float uStreakSpeed     = 3.50;   // 拉丝相速度随 strip 的增益
+// 撕裂相关量（关闭 tidalEnabled 时 CPU 传 0 → 拉丝/消散全部关闭，G9）
+uniform float uTidalStrip;      // 剥离物质流强度 strip = p^1.2（与 energy_stream_frag.glsl 同源）
+uniform float uTidalBodyFade;   // 本体消散强度 [0,1]
+uniform float uTidalProgress;   // 剥离进度 p ∈ [0,1]
 
 // Stellar evolution uniforms
 uniform int   uStarStage;          // 0 normal, 1 white dwarf, 2 neutron star, 3 black hole
@@ -670,37 +680,39 @@ void main() {
 
     float R = max(uStarSize, 1e-5);
 
-    // ===== 潮汐撕裂形变（仅普通恒星）=====
-    // 唯一驱动源 uTidalAmp（CPU 由剥离进度 p 积分得到，有界 [0, tidalStretch]）。
-    // 逆向映射：把采样坐标 d 沿"指向黑洞"方向收缩 → 屏幕上形体朝黑洞伸长。
-    if (uStarStage == 0) {
-        vec2 bd = uBHPos - uStarPos;
-        bd.x *= aspect;
-        float bdLen = length(bd);
-        float amp = max(uTidalAmp, 0.0);
-        if (bdLen > 0.001 && amp > 0.001) {
-            vec2 bdNorm = bd / bdLen;
-            vec2 bdPerp = vec2(-bdNorm.y, bdNorm.x);
+    // ===== 潮汐几何：形变发生在密度域（D2），不再压扁采样坐标 =====
+    // Why: 旧实现把 d 做逆向仿射，产出的是"几何硬边椭圆"——正是用户厌恶的形态。
+    //      体积气体应在密度域各向异性：沿潮汐轴 σ_A 拉长、垂直方向 σ_P 压缩。
+    //      唯一驱动源 uTidalAmp（CPU 由剥离进度 p 积分得到，有界 [0, tidalStretch]）。
+    vec2 bd = uBHPos - uStarPos;
+    bd.x *= aspect;
+    float bdLen = length(bd);
+    vec2 bdNorm = (bdLen > 1e-4) ? bd / bdLen : vec2(1.0, 0.0);
+    vec2 bdPerp = vec2(-bdNorm.y, bdNorm.x);
 
-            float dParallel = dot(d, bdNorm);  // positive = toward BH
-            float dPerp     = dot(d, bdPerp);
+    float amp    = max(uTidalAmp, 0.0);
+    float strip  = clamp(uTidalStrip, 0.0, 1.0);
+    float pTidal = clamp(uTidalProgress, 0.0, 1.0);
 
-            // 非对称：朝黑洞一侧拉得更长（鼻部），背侧轻微（尾部）
-            float stretchToward = 1.0 + amp;
-            float stretchAway   = 1.0 + amp * 0.2;
-            // 横向压缩 0.55：与 energy_stream_frag.glsl 的 noseWidth = R/(1+amp*0.55) 严格同源。
-            // 【交界不变量 S4】两侧改一处忘一处 → 流起点与本体鼻尖立刻错位。
-            float expandPerp    = 1.0 + amp * 0.55;
+    // 潮汐归一化坐标：ξ 沿"指向黑洞"轴（正 = 朝黑洞），η 垂直
+    float xi  = dot(d, bdNorm) / R;
+    float eta = dot(d, bdPerp) / R;
 
-            dParallel /= (dParallel > 0.0 ? stretchToward : stretchAway);
-            dPerp     *= expandPerp;
+    // 【D5 交界不变量】与 energy_stream_frag.glsl 逐字同源（两侧改一处忘一处 → 流起点立刻错位）：
+    //   L_nose(amp) = R·(1 + amp)               本体沿潮汐轴的可见半长
+    //   W_nose(amp) = R·max(1 - 0.30·amp, 0.35)  本体在鼻尖处的可见半宽
+    // K = sqrt(ln(1/ε))，ε = 0.05：密度降到 5% 处即"可见边界"。
+    // Why: 历史值 1.7315 是笔误（1.7315²=2.9981 ≠ ln20=2.99573）。此处用精确值
+    //      sqrt(ln(1/0.05)) = 1.730818，与 tidal_model_test.cpp 的 kK 同一数值（RK3）。
+    //      刻意写成字面常量而非 sqrt(log(...))：GLSL 是运行时编译，构建期无法校验，
+    //      常量函数调用若被驱动拒绝只能在启动日志暴露（V6），故取零风险写法。
+    const float K = 1.730818;
+    float sigA = (1.0 + amp) / K;                    // σ_A（归一化）：= L_nose/K/R
+    float sigP = max(1.0 - 0.30 * amp, 0.35) / K;    // σ_P（归一化）：= W_nose/K/R
+    float q2   = (xi * xi) / (sigA * sigA) + (eta * eta) / (sigP * sigP);
 
-            d = dParallel * bdNorm + dPerp * bdPerp;
-        }
-    }
-
-    float dist = length(d);
-    float nr = dist / R;
+    // amp = 0 时 sigA = sigP = 1/K → q2 = (nr·K)²，可见半径恰为 1.000·R（基线尺寸不变）
+    float nr = length(d) / R;
     float angle = atan(d.y, d.x);
     float t = uTime;
 
@@ -757,113 +769,115 @@ void main() {
         return;
     }
 
-    // ===== NORMAL STAR (stage 0) =====
+    // ===== NORMAL STAR (stage 0)：分层体积气体（L1 光球 / L2 色球 / L3 日冕）=====
+    // Why: 旧版把 photoAlpha 硬编码为 1.0，再经 finalAlpha = max(...) 输出 → 硬边不透明盘，
+    //      这就是"实心光球"。现在改为密度场 + Beer–Lambert 吸收：边缘自然变薄透光、
+    //      内部有可透视的层次，噪声调制的是"密度"而不再是"颜色"（R1 / G1 / G2）。
+    float pulse  = 1.0 + 0.03 * sin(t * 0.5) + 0.015 * sin(t * 1.2);
+    float q2p    = q2 / (pulse * pulse);          // 呼吸：整体半径 ±4%，形状不变量保持
+    float nrShape = sqrt(q2p) / K;                // 各向异性归一化半径（amp=0 时恒等于 nr）
 
-    if (nr > uCoronaSize * 2.5) discard;
+    // 【F2】裁剪域收紧：日冕门 2.6R + 日珥弧顶 3.2R → 1.8×uCoronaSize(默认 3.6R) 足够。
+    // 旧值 3.0× 使默认档裁到 6R（=150% 屏高），是"全屏遮罩"的覆盖域来源之一。
+    if (nrShape > uCoronaSize * 1.8) discard;
+
+    // 本体消散（T5）：同一份 p 已在流侧注入宽度/亮度，质量不凭空消失
+    float fadeT = smoothstep(0.35, 1.0, pTidal) * clamp(uTidalBodyFade, 0.0, 1.0);
 
     // ============================================================
-    // PHOTOSPHERE - dense filamentary texture
+    // L1 光球 + L2 色球：密度场（重噪声仅在可见区内计算 → 性能闸门 G10）
     // ============================================================
-    vec3 photoCol = vec3(0.0);
-    float photoAlpha = 0.0;
+    vec3  emitBody = vec3(0.0);
+    float absorb   = 0.0;
 
-    if (nr < 1.0) {
-        float r2 = nr * nr;
-        float cosTheta = sqrt(max(1.0 - r2, 0.0));
-        
-        // Build 3D sphere normal from screen position
-        vec3 n = normalize(vec3(d.x / R, d.y / R, cosTheta));
-        
-        // Simple 3D rotation around Y axis (like Earth spinning)
-        float rotAngle = t * 0.02;
-        float c = cos(rotAngle), s = sin(rotAngle);
-        n = vec3(c * n.x - s * n.z, n.y, s * n.x + c * n.z);
-        
-        // Use 3D noise directly on sphere surface - no UV seam!
-        vec3 noisePos = n * 12.0;
-        vec3 animPos = noisePos + vec3(t * 0.04, t * 0.03, 0.0);
-        
-        // === Layer 1: Dense turbulent filaments (main texture) - 3D seamless ===
-        float fil1 = turbulentSeamless(animPos * 3.0) * 0.5 + 0.5;
-        float fil2 = turbulentSeamless(animPos * 7.0 + vec3(100.0)) * 0.5 + 0.5;
-        float fil3 = turbulentSeamless(animPos * 15.0 + vec3(200.0)) * 0.5 + 0.5;
-        
-        // Combine with high-frequency detail
+    if (q2p <= 6.0) {
+        // 结构场：对流胞 / 网络 / 米粒 / 黑子（时间偏移使其静止时也持续演化 → G2）
+        vec2 sp = vec2(xi, eta);
+        float fil1 = fbm(sp * 3.0  + vec2( t * 0.020, -t * 0.012), 4);
+        float fil2 = fbm(sp * 7.0  + vec2(-t * 0.035,  t * 0.028) + 100.0, 3);
+        float fil3 = fbm(sp * 15.0 + vec2( t * 0.050,  t * 0.040) + 200.0, 2);
         float filaments = fil1 * 0.5 + fil2 * 0.3 + fil3 * 0.2;
-        
-        // === Layer 2: Bright network (emission lanes) - 3D seamless ===
-        float network = fbm3D(animPos * 4.0, 5);
-        network = smoothstep(0.3, 0.8, network);
-        
-        // === Layer 3: Cell-like structure (supergranules) - 3D seamless ===
-        float cells = fbm3D(animPos * 2.5, 4);
-        cells = smoothstep(0.0, 0.5, cells) * 0.5;
-        
-        // === Layer 4: Sunspots (large dark patches) - 3D seamless ===
-        float spots = fbm3D(n * 1.8 + vec3(50.0), 6);
-        float sunspot = smoothstep(0.58, 0.68, spots) * 0.6;
-        
-        // Combine - high contrast with more bright spots
+
+        float network = smoothstep(0.30, 0.80, fbm(sp * 4.0 + vec2(t * 0.015) + 300.0, 4));
+        float cells   = smoothstep(0.00, 0.50, fbm(sp * 2.5 + vec2(t * 0.010) + 400.0, 3)) * 0.5;
+        float sunspot = smoothstep(0.58, 0.68, fbm(sp * 1.8 + vec2(t * 0.005) + 500.0, 4)) * 0.6;
+
         float structure = filaments * 0.5 + network * 0.35 + cells * 0.15;
-        structure = mix(0.25, 1.5, structure);  // wider range
-        structure *= (1.0 - sunspot);
-        
-        // Add "heat shimmer" random flicker across surface
-        float heatFlicker = 0.85 + 0.15 * sin(t * 5.0 + valueNoise3D(animPos * 30.0) * 10.0);
-        structure *= heatFlicker;
-        
-        // Color: base palette derived from spectral type (uStarColor)
-        // uStarColor encodes the blackbody hue: blue for O/B, white for A, yellow for G, red for M
-        vec3 darkBase   = uStarColor * 0.35;
-        vec3 midBase    = uStarColor * 0.85;
-        vec3 brightBase = mix(uStarColor, vec3(1.0, 1.0, 0.95), 0.6); // blend toward white for bright regions
-        vec3 hotBase    = mix(uStarColor, vec3(1.0), 0.85);            // nearly white for hottest
-        
-        vec3 col = mix(darkBase, midBase, clamp(structure, 0.0, 1.0));
-        col = mix(col, brightBase, smoothstep(0.7, 1.1, structure));
-        col = mix(col, hotBase, smoothstep(1.0, 1.4, structure));
-        
-        // Apply star color tint
-        col *= uStarColor * 1.3;
-        
-        // Limb darkening - subtle
-        float limbDark = 0.45 + 0.55 * cosTheta;
-        col *= limbDark;
-        
-        // "Burning" feel: gamma boost and saturation push
-        col = pow(col, vec3(0.75));
-        col = mix(vec3(dot(col, vec3(0.299, 0.587, 0.114))), col, 1.3); // boost saturation
-        
-        // Overall brightness boost
-        col *= 1.3;
-        
-        photoCol = col;
-        photoAlpha = 1.0;
+        structure = mix(0.25, 1.5, structure) * (1.0 - sunspot);
+
+        // 拉丝场（R4 / G8）：横向高频、沿潮汐轴低频 → 条纹沿"指向黑洞"方向排列；
+        // 相速度随 strip 增大 → 撕裂越深，"被抽走"的动势越明显。
+        vec2  qq = vec2(eta, xi);
+        float streakPhase = t * (0.35 + uStreakSpeed * strip);
+        float streak = fbm(vec2(qq.y * 1.2, qq.x * 3.0 - streakPhase), 3);
+
+        // F(noise)：strip=0 退化为纯 structure（常态）；uStreakAmount=0.9 时等价于 0.55+0.90·streak
+        float F = structure * (1.0 + uStreakAmount * (streak - 0.5) * strip);
+
+        // ---- L1 光球：较厚（k₁ = uGasOpacity）----
+        float rho1 = exp(-q2p) * F;
+        float a1   = 1.0 - exp(-uGasOpacity * rho1);
+        a1 *= (1.0 - fadeT);
+
+        // ---- L2 色球：同一密度场，尺度 ×uChromoScale，吸收更薄（k₂ = 0.9）----
+        float rho2 = exp(-q2p / (uChromoScale * uChromoScale)) * F;
+        float a2   = 1.0 - exp(-0.9 * rho2);
+
+        // 两层叠加吸收（能量守恒：1-(1-α₁)(1-α₂)）
+        absorb = 1.0 - (1.0 - a1) * (1.0 - a2);
+
+        // 【F1b/G1 实机反馈修正】吸收（=本体不透明度）必须随本体一起结束：1.0R 起平滑归零。
+        // Why: exp(-q²) 的密度尾部经复合 max() 后，会在本体边界（nrShape=1）外留出
+        //      0.1~0.3 的半透明"遮罩盘"，且在 q2p≤6 早退边界（≈1.415R）形成 alpha 断层
+        //      —— 用户截图中恒星外围那圈大透明盘的主体。发射（日冕/日珥）不受此门限制。
+        // G1 第二轮实机反馈：旧窗口 (1.05,1.35) 起点偏晚，1.05R 处 absorb 仍 0.33，
+        //   与发射地板叠加后白色遮罩仍可见 → 窗口提前到 (1.0,1.2)，边界即开始收。
+        absorb *= 1.0 - smoothstep(1.0, 1.2, nrShape);
+
+        // ---- 发射 ----
+        // chord = 视向弦长 → 边缘变薄天然产生临边昏暗，这是"球"的立体感来源
+        float chord   = sqrt(max(1.0 - min(q2p, 1.0), 0.0));
+        vec3  coreCol = mix(uStarColor, vec3(1.0), 0.85);   // 与 energy_stream_frag.glsl 的 bodyHotCol 同源
+        emitBody  = mix(uStarColor, coreCol, smoothstep(0.45, 1.0, rho1))
+                  * (0.75 + 0.85 * rho1) * (0.45 + 0.55 * chord);
+        emitBody += uStarColor * rho2 * uCoronaBright * 1.10;
+        // 【G1 实机反馈修正】发射域门：emitBody 必须与本体一起结束。
+        // Why: chord 项在体外（q2p>1）只衰减到 0.45、(0.75+0.85·rho1) → 0.75，
+        //   乘积给出 0.34×uStarColor 的非零地板，一直铺到 q2p≤6 早退边界（1.415R）；
+        //   再加 L2 色球（1.75× 尺度）的尾部 rho2≈0.32，合成 1.0~1.4R 环带上约 28% 的
+        //   白色叠加 —— 这才是"最外层白色遮罩"的主体（F1b 只门了吸收，发射漏了）。
+        // 门从 1.0R 起算、1.25R 归零：与吸收门同域，日冕/日珥发射不受影响。
+        emitBody *= 1.0 - smoothstep(1.0, 1.25, nrShape);
+        emitBody *= (1.0 - 0.85 * fadeT);
     }
 
     // ============================================================
-    // OUTWARD GLOW - unified edge glow using star color
+    // L3 日冕：纯发射，任何距离都算（廉价）
+    // 【F1 实机反馈修正】v3.0 把衰减写成 exp(-x/1.10)，衰减率 0.91 仅为旧硬编码 3.0 的 1/3.3，
+    //   辉光在 2R 外仍有 0.16 强度，再经 finalAlpha = max(..., glowMask*0.5) 复合，
+    //   形成"罩住半个屏幕的半透明遮罩"（用户截图确认）。改回乘法衰减率：
+    //     glow = exp(-x · uCoronaFalloff · 2.8)
+    //   已保存的旧配置值 1.10 → 衰减率 3.08 ≈ 旧外观，无需配置迁移；滑块越大 = 越薄。
+    // 【F2】日冕物理上是"贴边薄层"：1.4R 外平滑归零，不再无限外扩。
     // ============================================================
-    vec3 glowCol = vec3(0.0);
+    vec3  glowCol = vec3(0.0);
     float glowMask = 0.0;
-    
-    if (nr > 1.0) {
-        // Soft exponential falloff outward from surface
-        float distFromEdge = nr - 1.0;
-        float falloff = exp(-distFromEdge * 3.0);
-        
-        // Subtle radial streamers (coronal streamers)
+    {
+        float distFromEdge = max(nrShape - 1.0, 0.0);
+        float falloff = exp(-distFromEdge * max(uCoronaFalloff, 0.05) * 2.8);
+
         float streamers = fbm(vec2(angle * 8.0 + t * 0.03, distFromEdge * 6.0), 4);
-        streamers = 0.3 + 0.7 * streamers;
-        
-        glowMask = falloff * streamers;
-        
-        // Use star color, slightly shifted to white-hot at the edge
-        glowCol = uStarColor * glowMask * uCoronaBright * 1.2;
+        streamers = 0.18 + 0.82 * streamers;
+
+        // 【G1 第二轮实机反馈】gate 从 (1.4,2.6) 收紧到 (1.1,2.0)。
+        // Why: F1b 只门吸收、G1 补门发射后，1.1~2.4R 仍有 glowMask×0.5 的 alpha 残余
+        //   （1.4R 处 ≈0.09），与旧 gate 的宽容起点叠加，遮罩边缘仍隐约可见。
+        // 日冕物理上就是贴边薄层：1.1R 起收、2.0R 归零（falloff 在 2R 处已 <1e-3，无跳变）。
+        float coronaGate = 1.0 - smoothstep(1.1, 2.0, distFromEdge);
+        glowMask = falloff * streamers * coronaGate;
+        glowCol = uStarColor * glowMask * uCoronaBright;
         glowCol = mix(glowCol, vec3(1.0, 0.85, 0.55), 0.25 * glowMask);
     }
-
-
 
     // ============================================================
     // PROMINENCES - erupting plasma arcs
@@ -915,8 +929,8 @@ void main() {
             
             // Angular distance on wrapped circle
             float da = abs(mod(angle - a + 3.14159, 6.28318) - 3.14159);
-            // Approximate arc-length distance at radius r
-            float d = sqrt(da * da * r * r + (nr - r) * (nr - r));
+            // Approximate arc-length distance at radius r（半径用各向异性 nrShape，随撕裂形变）
+            float d = sqrt(da * da * r * r + (nrShape - r) * (nrShape - r));
             
             // Thickness varies along arc: wider at base, narrower at top
             float thick = baseThick * (1.0 - 0.5 * h) * env;
@@ -969,7 +983,7 @@ void main() {
         float fw = 0.05 + hash21(vec2(seed + 19.0, fp)) * 0.06;
 
         float ad = abs(mod(angle - fa + 3.14159, 6.28318) - 3.14159);
-        float rd = abs(nr - fr);
+        float rd = abs(nrShape - fr);
 
         if (ad < fw && rd < fw * 0.5 && fenv > 0.01) {
             float fk = (1.0 - ad / fw) * (1.0 - rd / (fw * 0.5)) * fenv;
@@ -981,18 +995,10 @@ void main() {
     flareCol = vec3(1.0, 0.95, 0.85) * flare * 4.0;
 
     // ============================================================
-    // PULSATION
-    // ============================================================
-    float pulse = 1.0 + 0.03 * sin(t * 0.5) + 0.015 * sin(t * 1.2);
-    nr /= pulse;
-
-    // ============================================================
     // COMPOSITE
     // ============================================================
-    vec3 finalColor = photoCol * photoAlpha;
-    finalColor += glowCol;
-    finalColor += promCol;
-    finalColor += flareCol;
+    // 呼吸（pulse）已提前作用在 q2p 上，这里不再改 nr —— 避免扰动 D5 形状不变量。
+    vec3 finalColor = emitBody + glowCol + promCol + flareCol;
 
     // Evolution heating: as the star collapses it heats toward white-hot;
     // as it expands it brightens. (stage 0 only; size is driven by CPU)
@@ -1004,10 +1010,8 @@ void main() {
         finalColor *= 1.0 + uExpandProgress * 0.5;
     }
 
-    float finalAlpha = photoAlpha;
-    finalAlpha = max(finalAlpha, glowMask * 0.5);
-    finalAlpha = max(finalAlpha, prominence);
-    finalAlpha = max(finalAlpha, flare * 0.9);
+    // 覆盖度：吸收（吸收层）∪ 日冕/日珥/耀斑的发射掩膜。不再有硬编码的 1.0 → 软边（G1）
+    float finalAlpha = max(max(absorb, glowMask * 0.5), max(prominence, flare * 0.9));
     finalAlpha *= uStarAlpha;
 
     // Tonemap

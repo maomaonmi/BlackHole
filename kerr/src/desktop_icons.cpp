@@ -431,7 +431,15 @@ void DesktopIcons_Update(float holeScreenX, float holeScreenY, float dt) {
         float th     = r.th0 + s_spin * powf(p, 1.5f);
 
         if (radius < s_rHide) {
-            r.active = false; // 进入视界，停止移动，交由覆盖层遮蔽
+            // 【T6】进入视界 = 图标被吞：立即移到屏幕外，不留残影。
+            // Why: 旧实现只置 active=false 停止移动，图标实体滞留在黑洞中心坐标，
+            //      黑洞移走后路径上留下一堆堆叠图标。移到 (-16000,-16000) 是 Win32
+            //      ListView 的标准"藏图标"手法；Restore 用的是快照 sx/sy 原位，
+            //      与 lastX/lastY 无关，恢复功能不受影响。
+            WriteItemPosition(r.index, -16000, -16000);
+            r.lastX = -16000;
+            r.lastY = -16000;
+            r.active = false;
             continue;
         }
 

@@ -5,6 +5,7 @@
 #include "monitors.h"
 #include "star_texture.h"
 #include "desktop_icons.h"
+#include "window_devour.h"
 
 #include <imgui.h>
 #include <imgui_impl_win32.h>
@@ -471,8 +472,12 @@ static void Lissa(float t, float* outX, float* outY) {
 
 // Reproduce the black hole center in CPU so particles can follow it.
 // This mirrors the MODE_DEMO branch in blackhole.glsl (SIZE_MODE == MODE_DEMO).
+// outShadowR (可选)：屏幕阴影半径 rhT（aspect 校正 UV），= blackhole.glsl 内的 rh = HOLE_RADIUS*sz。
+// Why: 能量流的螺旋必须钉在真实吸积盘上。流 shader 自行推导尺度会与 blackhole.glsl 漂移 2.0~2.6 倍
+//      （历史 bug：流悬在盘外并被裁掉，观感像"被黑洞外围引力场挡住"）。这里把权威值暴露给 CPU，
+//      CPU 再换算成盘内/外半径以 uniform 广播，保证两侧不可能各自漂移。
 static void ComputeBlackHoleCenter(float t, float aspect, bool demoMode, float fixedLevel, bool fixedSize,
-                                   float* outCx, float* outCy) {
+                                   float* outCx, float* outCy, float* outShadowR) {
     const float HOLE_RADIUS   = 0.0200f;
     const float TOKEN_EASE    = 1.0f;
     const float TOKEN_AREA_MIN = 0.0100f;
@@ -539,6 +544,7 @@ static void ComputeBlackHoleCenter(float t, float aspect, bool demoMode, float f
 
     *outCx = (loX + hiX) * 0.5f + wanderX * ampEffX + wobAmpX * cosf(t * 0.8f);
     *outCy = (loY + hiY) * 0.5f + wanderY * ampEffY + wobAmpY * sinf(t * 1.0f);
+    if (outShadowR) *outShadowR = rhT;
 }
 
 static void UpdateParticles(float dt, float gravity, float spiral, float cx, float cy, float spinA) {
@@ -776,6 +782,9 @@ int main(int argc, char** argv) {
     GUI_Init(&wgl);
     printf("[BlackHole] ImGui initialized\n");
 
+    // 窗口吞噬模块（shader 编译失败仍启用：Trigger 走纯 SW_HIDE 降级路径）
+    WindowDevour_Init(wgl.hwnd);
+
     // Read vertex shader
     std::string vertSrc = ReadFile("shaders/vert.glsl");
     if (vertSrc.empty()) {
@@ -961,6 +970,10 @@ int main(int argc, char** argv) {
     int suBHPos = -1;
     int suTidalAmp = -1;
     int suStarTex = -1;
+    // 分层体积气体材质参数（T3~T5）：见 gui_config.h 的 starGasOpacity 等字段
+    int suGasOpacity = -1, suChromoScale = -1, suCoronaFalloff = -1;
+    int suStreakAmount = -1, suStreakSpeed = -1;
+    int suTidalStrip = -1, suTidalBodyFade = -1, suTidalProgress = -1;
     // Evolution uniforms
     int suStarStage = -1, suPassMode = -1;
     int suCollapseProgress = -1, suSupernovaProgress = -1, suExpandProgress = -1;
@@ -1000,6 +1013,14 @@ int main(int argc, char** argv) {
                 suBHPos        = glGetUniformLocation(starProgram, "uBHPos");
                 suTidalAmp     = glGetUniformLocation(starProgram, "uTidalAmp");
                 suStarTex      = glGetUniformLocation(starProgram, "uStarTex");
+                suGasOpacity      = glGetUniformLocation(starProgram, "uGasOpacity");
+                suChromoScale     = glGetUniformLocation(starProgram, "uChromoScale");
+                suCoronaFalloff   = glGetUniformLocation(starProgram, "uCoronaFalloff");
+                suStreakAmount    = glGetUniformLocation(starProgram, "uStreakAmount");
+                suStreakSpeed     = glGetUniformLocation(starProgram, "uStreakSpeed");
+                suTidalStrip      = glGetUniformLocation(starProgram, "uTidalStrip");
+                suTidalBodyFade   = glGetUniformLocation(starProgram, "uTidalBodyFade");
+                suTidalProgress   = glGetUniformLocation(starProgram, "uTidalProgress");
                 // Evolution uniforms
                 suStarStage         = glGetUniformLocation(starProgram, "uStarStage");
                 suPassMode          = glGetUniformLocation(starProgram, "uPassMode");
@@ -1050,6 +1071,8 @@ int main(int argc, char** argv) {
     int euStreamWidth = -1, euSpiralTurns = -1, euStreamColor = -1;
     int euStarAge = -1;
     int euTidalProgress = -1, euTidalAmp = -1, euStarSize = -1, euTidalStrip = -1;
+    // 真实吸积盘内/外径（aspect 校正 UV）：CPU 用权威 rhT 换算后广播，消除 shader 内重复推导（T1/D4）
+    int euDiskInnerUV = -1, euDiskOuterUV = -1;
 
     printf("[BlackHole] Energy stream shaders: vert=%zu bytes, frag=%zu bytes\n", eVertSrc.size(), eFragSrc.size());
 
@@ -1080,6 +1103,8 @@ int main(int argc, char** argv) {
                 euTidalAmp        = glGetUniformLocation(energyProgram, "uTidalAmp");
                 euStarSize        = glGetUniformLocation(energyProgram, "uStarSize");
                 euTidalStrip      = glGetUniformLocation(energyProgram, "uTidalStrip");
+                euDiskInnerUV     = glGetUniformLocation(energyProgram, "uDiskInnerUV");
+                euDiskOuterUV     = glGetUniformLocation(energyProgram, "uDiskOuterUV");
                 printf("[BlackHole] Energy stream shader program linked OK\n");
             }
         }
@@ -1380,7 +1405,10 @@ int main(int argc, char** argv) {
         float mainDilation = config.timeDilation > 0.0f ? config.timeDilation : 1.0f;
         float mainShaderT = (float)t * mainSpeed * mainDilation;
         float bhCx, bhCy;
-        ComputeBlackHoleCenter(mainShaderT, mainAspect, config.demoMode, config.fixedLevel, config.fixedSize, &bhCx, &bhCy);
+        // bhShadowR：本帧权威阴影半径（aspect 校正 UV），能量流据此把螺旋钉在真实吸积盘上（T1/D4）
+        float bhShadowR = 0.0f;
+        ComputeBlackHoleCenter(mainShaderT, mainAspect, config.demoMode, config.fixedLevel, config.fixedSize,
+                               &bhCx, &bhCy, &bhShadowR);
 
         // Apply shared shake to black hole center so overlays (energy stream, particles)
         // move together with the shaken background. Shake is in pixels; convert to UV.
@@ -1389,7 +1417,11 @@ int main(int argc, char** argv) {
         bhCx += shakeU;
         bhCy += shakeV;
 
-        // ---- Desktop icon devour: 黑洞中心(UV,Y-up) → 屏幕物理像素 → ListView 客户区 ----
+        // ---- Overlay 锚点：黑洞中心(UV,Y-up) → 屏幕物理像素 ----
+        // 图标吞噬（ListView 客户区）与窗口吞噬（GL 局部像素）共用此锚点；
+        // hoist 到循环作用域：中键触发与碎片渲染在帧内稍后引用。
+        float holeScreenX = 0.0f, holeScreenY = 0.0f;
+        float rHidePx = 40.0f;
         {
             MONITORINFO bhMi = {};
             bhMi.cbSize = sizeof(bhMi);
@@ -1397,12 +1429,12 @@ int main(int argc, char** argv) {
                 bhMi.rcMonitor.left = 0;
                 bhMi.rcMonitor.top  = 0;
             }
-            float holeScreenX = (float)bhMi.rcMonitor.left + bhCx * (float)wgl.width;
-            float holeScreenY = (float)bhMi.rcMonitor.top  + (1.0f - bhCy) * (float)wgl.height;
+            holeScreenX = (float)bhMi.rcMonitor.left + bhCx * (float)wgl.width;
+            holeScreenY = (float)bhMi.rcMonitor.top  + (1.0f - bhCy) * (float)wgl.height;
 
             // 视界遮蔽半径（像素）：由 holeRadius(UV) 粗略换算，TODO 接入更精确的视界半径。
             float holeUvForHide = config.holeRadius > 0.0f ? config.holeRadius : 0.02f;
-            float rHidePx = holeUvForHide * (float)wgl.width * 2.0f;
+            rHidePx = holeUvForHide * (float)wgl.width * 2.0f;
             if (rHidePx < 30.0f) rHidePx = 30.0f;
 
             DesktopIcons_SetParams(config.iconDevourRate, config.iconDevourSpin,
@@ -1410,6 +1442,10 @@ int main(int argc, char** argv) {
                                    config.iconDevourRestore);
             DesktopIcons_SetRHide(rHidePx);
             DesktopIcons_Update(holeScreenX, holeScreenY, dt);
+
+            WindowDevour_SetParams(config.winDevourRate, config.winDevourSpin,
+                                   config.winDevourWarp, config.winDevourStagger);
+            WindowDevour_SetRHide(rHidePx);
         }
 
         // ---- Render particle system to FBO (for gravitational lensing) ----
@@ -2460,6 +2496,19 @@ int main(int argc, char** argv) {
                 if (suBHPos >= 0)    glUniform2f(suBHPos, bhCx, bhCy);
                 if (suTidalAmp >= 0) glUniform1f(suTidalAmp, s.tidalAmp);
 
+                // 分层体积气体材质（T3~T5）。D1：材质全局常开，tidalEnabled 只门控撕裂相关量。
+                if (suGasOpacity >= 0)    glUniform1f(suGasOpacity,    config.starGasOpacity);
+                if (suChromoScale >= 0)   glUniform1f(suChromoScale,   config.starChromoScale);
+                if (suCoronaFalloff >= 0) glUniform1f(suCoronaFalloff, config.starCoronaFalloff);
+                if (suStreakAmount >= 0)  glUniform1f(suStreakAmount,  config.starStreakAmount);
+                if (suStreakSpeed >= 0)   glUniform1f(suStreakSpeed,   config.starStreakSpeed);
+                // 撕裂相关量：仅普通恒星 + 开关开启时生效，否则传 0 → 形变/拉丝/消散全部关闭（G9）
+                bool matTidal = config.tidalEnabled && s.stage == STAGE_NORMAL;
+                if (suTidalProgress >= 0) glUniform1f(suTidalProgress, matTidal ? s.tidalProgress : 0.0f);
+                if (suTidalStrip >= 0)    glUniform1f(suTidalStrip,    matTidal ? s.tidalStrip    : 0.0f);
+                if (suTidalBodyFade >= 0) glUniform1f(suTidalBodyFade,
+                                                      matTidal ? config.tidalBodyFade : 0.0f);
+
                 // ===== Evolution uniforms =====
                 if (suStarStage >= 0)            glUniform1i(suStarStage, (int)s.stage);
                 if (suCollapseProgress >= 0)     glUniform1f(suCollapseProgress, s.collapseProgress);
@@ -2607,13 +2656,14 @@ int main(int argc, char** argv) {
                     streamIntensity += closeBoost;
                 }
 
-                // 潮汐闸门：开启撕裂时，普通恒星的流强度正比于剥离进度 p。
-                // Why: baseIntensity 常驻 0.7 会让恒星刚生成、甚至远离黑洞时也拖着一条满长的流，
-                //      这正是"轨迹与本体分离"观感的来源之一。p = 0（未撕裂）→ 流不渲染。
+                // 潮汐闸门：开启撕裂时，普通恒星的流强度随剥离进度 p 单调增长（有底噪）。
+                // Why: baseIntensity 常驻 0.7 会让恒星刚生成、甚至远离黑洞时也拖着一条满长的流；
+                //      但直接 *= p 又把撕裂前半程压成 0（G4：p≈0.1 就该看到一条细亮丝）。
+                //      故用 0.30 + 0.70·p：起点有可辨识的细丝，随 p 单调变亮。
                 // 关闭开关时必须严格等价改动前行为，因此闸门必须受 tidalEnabled 保护
-                // （否则 tidalProgress 恒为 0 → 普通恒星的能量流完全不渲染，违反 G9）。
+                // （否则 tidalProgress 恒为 0 → 普通恒星的能量流被压到 0.30，违反 G9）。
                 if (config.tidalEnabled && activeStar->stage == STAGE_NORMAL) {
-                    streamIntensity *= activeStar->tidalProgress;
+                    streamIntensity *= (0.30f + 0.70f * activeStar->tidalProgress);
                 }
 
                 streamIntensity *= config.streamBright;
@@ -2666,6 +2716,17 @@ int main(int argc, char** argv) {
                         if (euStarSize >= 0)      glUniform1f(euStarSize, activeStar->size);
                     }
 
+                    // T1/D4：把流的螺旋钉死在 blackhole.glsl 的真实吸积盘上。
+                    // blackhole.glsl 内盘半径（aspect 校正 UV）= (r_rs / B_CRIT) * rh，其中 rh = HOLE_RADIUS*sz = bhShadowR。
+                    // 用与黑洞 shader 同帧同源的 effectiveDiskInner/Outer，避免流自算尺度产生 2.0~2.6 倍漂移。
+                    const float B_CRIT = 2.5980762f;
+                    float rinUV       = fmaxf(effectiveDiskInner, 1.6f);
+                    float routUV      = fmaxf(effectiveDiskOuter, rinUV + 0.5f);
+                    float diskInnerUV = (rinUV  / B_CRIT) * bhShadowR;
+                    float diskOuterUV = (routUV / B_CRIT) * bhShadowR;
+                    if (euDiskInnerUV >= 0) glUniform1f(euDiskInnerUV, diskInnerUV);
+                    if (euDiskOuterUV >= 0) glUniform1f(euDiskOuterUV, diskOuterUV);
+
                     glBindVertexArray(vao);
                     glDrawArrays(0x0005/*GL_TRIANGLE_STRIP*/, 0, 4);
                     glBindVertexArray(0);
@@ -2677,6 +2738,10 @@ int main(int argc, char** argv) {
                 }
             }
         }
+
+        // ---- 窗口吞噬碎片渲染：黑洞场景与能量流之上、ImGui 之下 ----
+        // Update 内部自绘（自备 shader/混合/深度状态保存还原），无活动碎片时零开销。
+        WindowDevour_Update(holeScreenX, holeScreenY, dt);
 
         // ---- Middle-click: two-key coexistence (Q5) ----
         // 存在 stage==NEUTRON_STAR 且 evo==EVO_IDLE 的恒星 → 走既有中子星坍缩；
@@ -2709,6 +2774,12 @@ int main(int argc, char** argv) {
                            DesktopIcons_IsDevouring() ? "START" : "STOP",
                            DesktopIcons_LastError());
                 }
+                // 窗口吞噬：与中子星坍缩/图标吞噬并存（计划书 Q1：同一次中键同时触发）。
+                // 被吞窗口按用户需求保持隐藏，不提供还原。
+                if (config.winDevourEnabled) {
+                    int eaten = WindowDevour_Trigger(holeScreenX, holeScreenY);
+                    printf("[BlackHole] Middle-click -> window devour: %d windows\n", eaten);
+                }
             }
             mMouseWasDown = mMouseDown;
         }
@@ -2732,6 +2803,8 @@ int main(int argc, char** argv) {
     }
     // 退出还原桌面图标（atexit 之外的主退出路径显式调用）
     DesktopIcons_Shutdown();
+    // 窗口吞噬：清理碎片纹理/缓冲（被吞窗口按需求保持隐藏，不还原）
+    WindowDevour_Shutdown();
     GUI_Shutdown();
     if (captureActive) WGC_Shutdown(&wgc);
     GLTex_Shutdown(&glTex);

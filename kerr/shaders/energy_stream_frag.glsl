@@ -23,6 +23,12 @@ uniform float uTidalAmp          = 0.0;
 uniform float uTidalStrip        = 0.0;
 // 本体真实半径（UV, aspect 校正）。>0 时用它与 uTidalAmp 精确对齐流起点，替代原有启发式
 uniform float uStarSize          = 0.0;
+// 真实吸积盘内/外径（aspect 校正 UV）。由 CPU 用 blackhole.glsl 的权威 rhT 换算后广播。
+// Why: 本 shader 曾自行重复推导 DEMO_SEC/DEMO_GROW_SEC/rh，与 blackhole.glsl 用途不同却公式相似，
+//      导致螺旋半径比真实盘大 2.0~2.6 倍，末端悬在盘外并被裁掉（观感="被黑洞外围引力场挡住"）。
+//      缺省值对应默认档 (rh≈0.133)：inner=1.8/2.598*0.133≈0.092，outer=8/2.598*0.133≈0.41。
+uniform float uDiskInnerUV       = 0.092;
+uniform float uDiskOuterUV       = 0.410;
 
 // ================================================================
 // Noise toolkit (strictly typed for maximum compatibility)
@@ -102,8 +108,15 @@ void main() {
     float spiralProgress;
     if (uTidalProgress >= 0.0) {
         // 潮汐模式：进度与本体形变严格同源（p 已同时包含距离与时间两个因素）
-        tdeProgress    = clamp(max(uTidalProgress, 0.02), 0.001, 1.0);
-        spiralProgress = clamp((uTidalProgress - 0.70) / 0.30, 0.0, 1.0);
+        // 【F3/G2-B 实机反馈修正】两轮教训：
+        //   旧式 max(p,0.02) → 6px 残桩（几何闸门漏修）；改 0.30+0.70p 后用户仍反馈
+        //   "流到中途就停，像被挡住"。两个原因：① 贝塞尔参数 s≠弧长，s=0.30 的实际
+        //   可见路程只有约 21%（B(0.3) 权重），底噪仍太短；② p<0.55 时螺旋段整段
+        //   不画，流终点悬在半空，与黑洞之间永远留真空隙。
+        // 现改为：底噪 0.60（可见路程 ≈52%），螺旋段从 p=0.55 提前介入且保留 0.10
+        //   底噪 —— 两端同时可见，随 p 相向生长，p=1 时无缝汇合。
+        tdeProgress    = clamp(0.60 + 0.40 * max(uTidalProgress, 0.0), 0.02, 1.0);
+        spiralProgress = clamp(0.10 + 0.90 * max(uTidalProgress - 0.55, 0.0) / 0.45, 0.0, 1.0);
     } else {
         // 回退：原有 age 定时器（白矮星 / 中子星 / 黑洞桥 / 关闭潮汐开关时）
         // 前 5.0 秒为能量流向外拉长伸展的阶段
@@ -114,21 +127,16 @@ void main() {
     }
 
     // ------------------------------------------------------------
-    // 2. 解算黑洞动态视界半径 rh
+    // 2. 吸积区半径：来自 CPU 广播的真实盘半径（T1/D4）
     // ------------------------------------------------------------
-    float DEMO_SEC = 42.0;
-    float DEMO_GROW_SEC = 40.0;
-    float lvl = min(mod(uTime, DEMO_SEC) / DEMO_GROW_SEC, 1.0);
-    float gSize = pow(clamp(lvl, 0.0, 1.0), 1.0); 
-    float rhMin = sqrt(0.0100 * aspect / 3.14159265); 
-    float rhMax = sqrt(0.5000 * aspect / 3.14159265); 
-    float rh = mix(rhMin, rhMax, gSize) * (0.0200 / 0.08); 
+    // 不再自行推导 rh：本 shader 无法知道 supermassiveMode / 用户覆盖等 CPU 侧状态，
+    // 一旦自行推导就必然与 blackhole.glsl 漂移。这里只做退化保护。
+    float diskInner = max(uDiskInnerUV, 0.01);
+    float diskOuter = max(uDiskOuterUV, diskInner + 0.02);
 
     // ------------------------------------------------------------
-    // 3. 吸积区与三维椭圆投影 (DISK_INCL = 1.5, DISK_ROLL = 0.35)
+    // 3. 三维椭圆投影 (DISK_INCL = 1.5, DISK_ROLL = 0.35)
     // ------------------------------------------------------------
-    float diskOuter = min(6.0 * rh, starToBH * 0.7);
-    float diskInner = min(1.8 * rh, diskOuter * 0.3);
 
     float incl = 1.5;   
     float roll = 0.35;  
@@ -155,11 +163,17 @@ void main() {
     float strip = clamp(uTidalStrip, 0.0, 1.0);
     float starRadius;
     float noseWidth;
-    if (tidalAmp > 0.0 && uStarSize > 0.0) {
+    // 【F3b】只要知道本体半径就走 D5 精确对齐（amp=0 时 L_nose=R 恰为未形变鼻尖）。
+    // Why: 旧条件 tidalAmp>0 使 p=0 时退回启发式 starRadius=0.18，与真实半径
+    //      （uStarSize 可为 0.25）错位 —— 底噪细丝会从"空气"里出发，而不是从鼻尖出发。
+    if (uStarSize > 0.0) {
+        // 【S4 交界不变量 / D5】与 star_frag.glsl 共用同一组解析式（不再各自用魔数）：
+        //   L_nose(amp) = R·(1 + amp)              本体沿潮汐轴的可见半长
+        //   W_nose(amp) = R·max(1 - 0.30·amp, 0.35) 本体在鼻尖处的可见半宽
+        // Why: 旧式 R/(1+amp·0.55) 与本体 R·(1-0.30·amp) 在 amp=0.6 时相差 9%，
+        //      两侧改一处忘一处 → 流起点与本体鼻尖立刻错位。现在同一个 amp 只会得到同一个值。
         starRadius = uStarSize * (1.0 + tidalAmp);
-        // w 是流的半宽：必须与 star_frag.glsl 的 expandPerp = 1+amp*0.55 严格同源，
-        // 否则流起点与本体鼻尖错位（S4 交界不变量）。
-        noseWidth  = max(uStarSize / (1.0 + tidalAmp * 0.55), 0.004);
+        noseWidth  = max(uStarSize * max(1.0 - 0.30 * tidalAmp, 0.35), 0.004);
     } else {
         starRadius = min(0.18, starToBH * 0.25);
         noseWidth  = 0.04;
@@ -196,8 +210,10 @@ void main() {
         // 尖头平滑收缩
         float lengthMask = smoothstep(tdeProgress, max(0.001, tdeProgress - 0.15), s);
 
-        // S4-b：尾端宽度随 strip 增粗（strip=0 → 0.015，与改动前逐位等价）
-        float wBase = mix(noseWidth, mix(0.015, 0.085, strip), s) * lengthMask; 
+        // S4-b / T6：尾端宽度随 strip 增粗，但收缩得更快（sqrt(s)）。
+        // Why: 加色混合下贡献 ∝ 颜色×alpha，与宽度无关 —— "宽而暗"在亮盘面上没有信噪比，
+        //      只有"细而亮"的丝才能被看见。Step A 的 0.085 均匀尾宽正是"流不明显"的成因之一。
+        float wBase = mix(noseWidth, mix(0.010, 0.042, strip), sqrt(s)) * lengthMask; 
         wBase *= (0.8 + 0.5 * hash11(s * 100.0)); 
         wBase *= uStreamWidth; 
         float w = wBase * uStreamIntensity;
@@ -290,9 +306,13 @@ void main() {
     // 调节亮度与光谱色彩（Color Tuning Zone）
     // ------------------------------------------------------------
     vec3 starTint = uStreamColor; 
-    
-    // 【调节发光点 4】：你可以增大 0.85 到 1.0。越大，起点恒星大气的纯色就越浓，白芯越少
-    vec3 colStarEnd = mix(vec3(1.0, 0.98, 0.95), starTint, 0.85); 
+
+    // 【T7 材质一体化 / D5 同源】起点色 = 本体光球的最热色，显式取自 star_frag.glsl 的同一常量
+    //   star_frag.glsl: coreCol = mix(uStarColor, vec3(1.0), 0.85)
+    // Why: 旧式 mix(vec3(1,0.98,0.95), starTint, 0.85) 是经验系数，与本体无解析关系 ——
+    //      这正是"能量流和恒星本体根本不搭边"的颜色层成因。现在同一 amp/同一 tint 只会得到同一个色。
+    vec3 bodyHotCol = mix(starTint, vec3(1.0), 0.85);
+    vec3 colStarEnd = mix(bodyHotCol, starTint, 0.35); // 起点偏白热，与本体最热色连续
     vec3 colMid     = starTint; // 中间段 100% 纯正的恒星光谱本色
     vec3 colBHEnd   = mix(vec3(0.92, 0.25, 0.05), starTint, 0.65); // 捕获端汇入黄色吸积盘
 
@@ -315,12 +335,11 @@ void main() {
     // strip=0 时 mix 系数为 0，颜色与改动前逐位等价。
     streamCol = mix(streamCol, vec3(0.72, 0.84, 1.0), strip * 0.55);
 
-    // 【调节发光点 3】：白热核心管道粗细。你可以将 0.08 下调到 0.02 使白芯极细
-    float core = smoothstep(0.08, 0.0, bestDist);
-    vec3 coreColor = mix(vec3(1.0, 1.0, 1.0), starTint, 0.6) * 1.1;
-    
-    // 【调节发光点 2】：白芯的融合比例。你可以将 0.25 降为 0.0，使整条流体完全不带白色，实现纯原色渲染！
-    streamCol = mix(streamCol, coreColor, core * 0.1);
+    // 【T6 白芯】阈值 0.08 → 0.05（更细），融合比例 0.1 → 0.35（更亮）。
+    // Why: 加色混合下白芯是唯一能在亮盘面上"赢"出来的高频亮点；旧值让流只剩一层暗雾。
+    float core = smoothstep(0.05, 0.0, bestDist);
+    vec3 coreColor = mix(vec3(1.0), starTint, 0.6) * 1.1;
+    streamCol = mix(streamCol, coreColor, core * 0.35);
 
     // 边缘气态火晕
     float edgeGlow = smoothstep(1.5, 0.3, bestDist) * (1.0 - smoothstep(0.3, 0.0, bestDist));

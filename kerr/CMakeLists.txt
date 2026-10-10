@@ -14,6 +14,7 @@ set(BH_SOURCES
     src/gui_config.cpp
     src/star_texture.cpp
     src/desktop_icons.cpp
+    src/window_devour.cpp
 )
 
 set(BH_HEADERS
@@ -26,6 +27,7 @@ set(BH_HEADERS
     src/gui_config.h
     src/star_texture.h
     src/desktop_icons.h
+    src/window_devour.h
 )
 
 # ImGui sources
@@ -44,6 +46,10 @@ add_executable(blackhole
     ${IMGUI_SOURCES}
     resource.rc
 )
+
+# ---- 单元测试：潮汐时间模型 + D5 可见半径不变量（T8）----
+# Why: 纯函数镜像，不依赖 OpenGL/GUI，可单独构建运行；与主 target 无耦合。
+add_executable(tidal_model_test src/tidal_model_test.cpp)
 
 target_include_directories(blackhole PRIVATE
     ${CMAKE_SOURCE_DIR}/src
@@ -78,8 +84,12 @@ target_link_libraries(blackhole PRIVATE
     wtsapi32
 )
 
-# Copy shaders to build directory
-add_custom_command(TARGET blackhole POST_BUILD
+# ---- 资源同步（F5）----
+# Why: shader 由运行时 ReadFile 加载，不是编译依赖。仅改 .glsl 后 make 判定"无工作"，
+#      build/shaders 留旧版 → 运行时加载过期 shader（本轮修复差点因此再次失效）。
+#      自定义 target + DEPENDS 时间戳：shader 变化才重新拷贝；ALL 保证默认构建覆盖。
+file(GLOB BH_SHADER_FILES ${CMAKE_SOURCE_DIR}/shaders/*.glsl)
+add_custom_target(sync_assets ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_SOURCE_DIR}/shaders
         ${CMAKE_BINARY_DIR}/shaders
@@ -89,8 +99,10 @@ add_custom_command(TARGET blackhole POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_SOURCE_DIR}/blackhole.glsl
         ${CMAKE_BINARY_DIR}/blackhole.glsl
-    COMMENT "Copying shaders and textures to build directory"
+    DEPENDS ${BH_SHADER_FILES}
+    COMMENT "Syncing shaders and textures to build directory"
 )
+add_dependencies(blackhole sync_assets)
 
 # ---- D3D11 renderer (optional, disabled by default) ----
 option(BLACKHOLE_USE_D3D11 "Enable D3D11 rendering path" OFF)
