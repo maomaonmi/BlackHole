@@ -133,7 +133,7 @@ struct BlackholeConfig {
     bool  iconDevourEnabled   = false;   // 功能总开关
     float iconDevourRate      = 0.35f;   // 内缩速率 λ
     float iconDevourSpin      = 1.2f;    // 旋转角速度 ω
-    float iconDevourStretch   = 1.0f;    // shader 径向拉伸增益
+    float iconDevourStretch   = 2.0f;    // shader 径向拉伸增益（越大越接近"一根线"）
     float iconDevourSwirl     = 1.0f;    // shader 漩涡增益
     float iconDevourStagger   = 0.15f;   // 错峰间隔（秒 / 图标）
     int   iconDevourThrottleHz= 30;      // 坐标下发频率

@@ -135,19 +135,38 @@ vec4 getParticleTexture(vec2 uv) {
     return texture(iChannel1, uv);
 }
 
-// Desktop icon devour field: 把输出屏幕 UV 映射到"更远处"的源 UV。
-// 径向拉伸（1/r 发散）导致源内容被拉长 → 图标呈面条状拖尾；叠加切向旋转 → 螺旋卷入。
-// Why：uDevourStretch/Swirl 以"增益"为单位（滑块 ~[0,3]），SCALE 把 UV 量纲的
-// 1/r 项压到合理视觉范围（典型视界半径 ~0.02-0.08 UV）。具体标定见计划书 §5.2 调参项。
+// Desktop icon devour field: 把输出屏幕 UV 映射到"更远处"的源 UV，形成流向黑洞的吸入场。
+//
+// Spaghettification（拉成一根线）原理：
+//   1:1 的等距位移只能把内容整体搬走，不会改变局部尺度；要"拉伸"，必须让径向映射的
+//   导数 |drSrc/dr| < 1。记 G(r)=rSrc(r)，则源半径 R 附近宽 δ 的一小段内容会在输出上
+//   占据 δ/|G'(r)| 的径向区间 —— |G'| 越小，图标在径向被拉得越长（放大成细长条）；
+//   |G'|→0 时趋于一根线。
+//
+//   取 G(r) = r + K·exp(-r/σ)，则 G'(r) = 1 − (K/σ)·exp(-r/σ)：
+//     * r→0 : G'(0) = 1 − K/σ       （K→σ 时 G'→0，中心处拉伸倍率 1/|G'| → ∞）
+//     * r→∞ : G'→1, G→r            （远处严格恢复，且无全局平移）
+//     * 单调 : G' ≥ 1 − K/σ ≥ 0     当 K ≤ σ（保证不折叠、不镜像）
+//     * 拉伸倍率 1/|G'(r)| 随 r 减小而单调增大 → 越接近黑洞被拉得越长，正是所需。
+//
+// Why 用"径向尺度压缩"（= 径向放大）而非多 tap 运动模糊：
+//   |G'|<1 属于放大采样，双线性插值天然平滑、无走样，能给出最利落的细线；
+//   若后续想要更柔的彗尾感，可再叠加径向多 tap 平均（见计划书 §5 备选）。
 vec2 devourWarpUV(vec2 uvIn) {
     if (uDevourEnable == 0) return uvIn;   // 关闭时严格保持原行为
     const float EPS   = 1e-4;
-    const float SCALE = 0.02;
+    const float SIGMA = 0.090;             // 拉伸作用尺度（UV）：越大作用范围越广、同样半径下拉得越长
     vec2  d  = uvIn - uDevourHoleUV;
     float r  = length(d);
     float th = atan(d.y, d.x);
-    float rSrc  = r * (1.0 + (uDevourStretch * SCALE) / (r + EPS));
-    float thSrc = th + (uDevourSwirl * SCALE) / (r + EPS);
+
+    // 增益标定：滑块 [0,4] 经饱和映射到 K/σ ∈ [0,0.9)，避免 G'≤0 造成折叠。
+    // 默认 stretch=2 → 约 4.5×(中心)，越靠黑洞越强。
+    float strength = 0.9 * (1.0 - exp(-max(uDevourStretch, 0.0)));
+    float K        = SIGMA * strength;
+    float rSrc     = r + K * exp(-r / SIGMA);
+
+    float thSrc = th + (uDevourSwirl * 0.02) / (r + EPS);
     return uDevourHoleUV + rSrc * vec2(cos(thSrc), sin(thSrc));
 }
 

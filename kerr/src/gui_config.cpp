@@ -151,7 +151,7 @@ void Config_SetDefaults(BlackholeConfig* cfg) {
     cfg->iconDevourEnabled    = false;
     cfg->iconDevourRate       = 0.35f;
     cfg->iconDevourSpin       = 1.2f;
-    cfg->iconDevourStretch    = 1.0f;
+    cfg->iconDevourStretch    = 2.0f;
     cfg->iconDevourSwirl      = 1.0f;
     cfg->iconDevourStagger    = 0.15f;
     cfg->iconDevourThrottleHz = 30;
@@ -1005,7 +1005,7 @@ void GUI_Render(BlackholeConfig* cfg) {
         ImGui::SliderFloat(u8"\u5185\u7F29\u901F\u7387", &cfg->iconDevourRate, 0.05f, 2.0f, u8"%.2f"); // 内缩速率
         ImGui::SliderFloat(u8"\u65CB\u8F6C\u89D2\u901F\u5EA6", &cfg->iconDevourSpin, 0.0f, 6.0f, u8"%.2f"); // 旋转角速度
         ImGui::SliderFloat(u8"\u9519\u5CF0\u95F4\u9694", &cfg->iconDevourStagger, 0.0f, 1.0f, u8"%.3f"); // 错峰间隔
-        ImGui::SliderFloat(u8"\u62C9\u4F38\u589E\u76CA", &cfg->iconDevourStretch, 0.0f, 3.0f, u8"%.2f"); // 拉伸增益
+        ImGui::SliderFloat(u8"\u62C9\u4F38\u589E\u76CA", &cfg->iconDevourStretch, 0.0f, 4.0f, u8"%.2f"); // 拉伸增益
         ImGui::SliderFloat(u8"\u6F26\u6DA1\u589E\u76CA", &cfg->iconDevourSwirl, 0.0f, 3.0f, u8"%.2f"); // 漩涡增益
         ImGui::SliderInt(u8"\u4E0B\u53D1\u9891\u7387", &cfg->iconDevourThrottleHz, 5, 60, u8"%d Hz"); // 下发频率
         ImGui::Checkbox(u8"\u505C\u6B62\u65F6\u8FD8\u539F", &cfg->iconDevourRestore); // 停止时还原
